@@ -16,6 +16,8 @@ const userSchema = new mongoose.Schema(
     emailVerifyExpires: { type: Date, default: null },
     phoneVerifyCode: { type: String, default: null },
     phoneVerifyExpires: { type: Date, default: null },
+    ratingAvg:   { type: Number, default: null },
+    ratingCount: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { API_BASE } from '@/lib/config';
-import type { AppNotification, ChatThread, JoinRequestSummary, Ride, User } from '@/lib/types';
+import type { AppNotification, ChatThread, JoinRequestSummary, Review, Ride, User } from '@/lib/types';
 
 const TOKEN_KEY = 'sameway_token';
 
@@ -286,6 +286,46 @@ export async function sendChatMessage(threadId: string, text: string): Promise<C
       ...(await authHeader()),
     },
     body: JSON.stringify({ text }),
+  });
+  return parseJson(res);
+}
+
+export async function fetchMyRides(): Promise<Ride[]> {
+  const res = await fetch(`${API_BASE}/api/me/rides`, {
+    headers: { Accept: 'application/json', ...(await authHeader()) },
+  });
+  return parseJson(res);
+}
+
+export async function cancelRide(rideId: string): Promise<{ ok: boolean; id: string }> {
+  const res = await fetch(`${API_BASE}/api/rides/${rideId}`, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json', ...(await authHeader()) },
+  });
+  return parseJson(res);
+}
+
+export async function submitReview(
+  rideId: string,
+  revieweeId: string,
+  rating: number,
+  comment: string,
+): Promise<Review> {
+  const res = await fetch(`${API_BASE}/api/rides/${rideId}/reviews`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...(await authHeader()),
+    },
+    body: JSON.stringify({ revieweeId, rating, comment }),
+  });
+  return parseJson(res);
+}
+
+export async function fetchUserReviews(userId: string): Promise<Review[]> {
+  const res = await fetch(`${API_BASE}/api/users/${userId}/reviews`, {
+    headers: { Accept: 'application/json', ...(await authHeader()) },
   });
   return parseJson(res);
 }

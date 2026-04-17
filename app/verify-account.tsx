@@ -12,6 +12,7 @@ import {
   TextInput,
 } from 'react-native';
 
+import { AnimatedBackground } from '@/components/AnimatedBackground';
 import { Neon } from '@/constants/theme';
 import { useAuth } from '@/contexts/AuthContext';
 import * as api from '@/lib/api';
@@ -117,6 +118,7 @@ export default function VerifyAccountScreen() {
 
   return (
     <LinearGradient colors={[Neon.gradientStart, Neon.gradientMid, Neon.gradientEnd]} style={styles.bg}>
+      <AnimatedBackground />
       <KeyboardAvoidingView
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}>

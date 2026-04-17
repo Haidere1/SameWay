@@ -10,8 +10,9 @@ const rideSchema = new mongoose.Schema(
     passengers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     fromLat: { type: Number, default: null },
     fromLng: { type: Number, default: null },
-    toLat: { type: Number, default: null },
-    toLng: { type: Number, default: null },
+    toLat:     { type: Number, default: null },
+    toLng:     { type: Number, default: null },
+    cancelled: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

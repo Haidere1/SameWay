@@ -9,6 +9,8 @@ export type User = {
   emailVerified?: boolean;
   phoneVerified?: boolean;
   cnicDocumentUploaded?: boolean;
+  ratingAvg?: number | null;
+  ratingCount?: number;
 };
 
 export type DriverSummary = {
@@ -45,9 +47,20 @@ export type Ride = {
   toLat: number | null;
   toLng: number | null;
   distanceKm?: number;
+  cancelled?: boolean;
   driver: DriverSummary | null;
   myJoinRequest?: JoinRequestSummary | null;
   chatThreadId?: string | null;
+};
+
+export type Review = {
+  id: string;
+  rating: number;
+  comment: string;
+  role: 'driver' | 'rider';
+  createdAt: string;
+  ride: { id: string; from: string; to: string; when: string } | null;
+  reviewer: { id: string; name: string; avatarUrl: string | null } | null;
 };
 
 export type AppNotification = {

@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 
+import { AnimatedBackground } from '@/components/AnimatedBackground';
 import { Neon } from '@/constants/theme';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChat } from '@/contexts/ChatContext';
@@ -28,21 +29,22 @@ const IS_MAP = Platform.OS === 'ios' || Platform.OS === 'android';
 function formatWhen(iso: string) {
   try {
     return new Date(iso).toLocaleString(undefined, {
-      weekday: 'long',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
+      weekday: 'long', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     });
-  } catch {
-    return iso;
-  }
+  } catch { return iso; }
 }
 
-function telUrl(phone: string) {
-  const cleaned = phone.replace(/[^\d+]/g, '');
-  return `tel:${cleaned}`;
+function timeUntil(iso: string) {
+  const diff = new Date(iso).getTime() - Date.now();
+  if (diff < 0) return 'Departed';
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  if (h > 24) return `${Math.floor(h / 24)}d away`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
 }
+
+function telUrl(phone: string) { return `tel:${phone.replace(/[^\d+]/g, '')}`; }
 
 export default function RideDetailScreen() {
   const { id: rawId } = useLocalSearchParams<{ id: string | string[]; join?: string | string[] }>();
@@ -68,35 +70,19 @@ export default function RideDetailScreen() {
   useEffect(() => {
     let alive = true;
     (async () => {
-      if (!id) {
-        setLoading(false);
-        return;
-      }
-      try {
-        await load();
-      } catch (e) {
-        if (alive) {
-          Alert.alert('Error', e instanceof Error ? e.message : 'Could not load ride');
-        }
-      } finally {
-        if (alive) setLoading(false);
-      }
+      if (!id) { setLoading(false); return; }
+      try { await load(); }
+      catch (e) { if (alive) Alert.alert('Error', e instanceof Error ? e.message : 'Could not load ride'); }
+      finally { if (alive) setLoading(false); }
     })();
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [id, load]);
 
   const region = useMemo(() => {
     if (!ride?.fromLat || !ride?.fromLng) return null;
     const lat = (ride.fromLat + (ride.toLat ?? ride.fromLat)) / 2;
     const lng = (ride.fromLng + (ride.toLng ?? ride.fromLng)) / 2;
-    return {
-      latitude: lat,
-      longitude: lng,
-      latitudeDelta: 0.15,
-      longitudeDelta: 0.15,
-    };
+    return { latitude: lat, longitude: lng, latitudeDelta: 0.15, longitudeDelta: 0.15 };
   }, [ride]);
 
   const d = ride?.driver;
@@ -106,54 +92,28 @@ export default function RideDetailScreen() {
   const full = !!(ride && ride.passengerIds.length >= ride.seatCount);
   const jr = ride?.myJoinRequest;
   const openJoin = !!(jr && (jr.status === 'pending' || jr.status === 'negotiating'));
-  const canRequestJoin = !!(
-    user &&
-    ride &&
-    d &&
-    accountReady &&
-    !isDriver &&
-    !already &&
-    !full &&
-    !openJoin
-  );
-
+  const canRequestJoin = !!(user && ride && d && accountReady && !isDriver && !already && !full && !openJoin);
   const rideUpcoming = ride ? new Date(ride.when).getTime() > Date.now() : false;
-  const showRideChat =
-    !!user &&
-    accountReady &&
-    already &&
-    !isDriver &&
-    !!ride?.chatThreadId &&
-    rideUpcoming;
+  const showRideChat = !!user && accountReady && already && !isDriver && !!ride?.chatThreadId && rideUpcoming;
 
   const submitJoinRequest = async () => {
-    if (!user || !ride) {
-      Alert.alert('Sign in', 'Sign in to request a seat.');
-      return;
-    }
+    if (!user || !ride) { Alert.alert('Sign in', 'Sign in to request a seat.'); return; }
     if (!accountReady) {
-      Alert.alert('Verification', 'Finish email, phone, and CNIC verification before requesting a seat.', [
+      Alert.alert('Verification required', 'Finish verification before requesting a seat.', [
         { text: 'Later', style: 'cancel' },
         { text: 'Verify', onPress: () => router.push('/verify-account') },
-      ]);
-      return;
+      ]); return;
     }
     const n = parseFloat(fareOffer.replace(/,/g, ''));
-    if (!Number.isFinite(n) || n <= 0) {
-      Alert.alert('Fare', 'Enter a positive fare you are willing to pay (e.g. 500).');
-      return;
-    }
+    if (!Number.isFinite(n) || n <= 0) { Alert.alert('Fare', 'Enter a positive fare (e.g. 500).'); return; }
     setSubmitting(true);
     try {
       const created = await api.createJoinRequest(ride.id, n);
       setRide((prev) => (prev ? { ...prev, myJoinRequest: created } : prev));
       setFareOffer('');
-      Alert.alert('Request sent', 'The driver will see your offer in their Inbox and can accept or counter.');
-    } catch (e) {
-      Alert.alert('Could not request', e instanceof Error ? e.message : 'Try again');
-    } finally {
-      setSubmitting(false);
-    }
+      Alert.alert('Request sent', 'The driver will see your offer in their Inbox.');
+    } catch (e) { Alert.alert('Could not request', e instanceof Error ? e.message : 'Try again'); }
+    finally { setSubmitting(false); }
   };
 
   const runRiderAction = async (action: 'accept' | 'reject' | 'counter' | 'withdraw', counterFare?: number) => {
@@ -162,48 +122,61 @@ export default function RideDetailScreen() {
     try {
       const updated = await api.riderJoinAction(jr.id, action, counterFare);
       await load();
-      if (updated.chatThreadId) {
-        await refreshThreads();
-        openThread(updated.chatThreadId);
-      }
-      if (action === 'accept') {
-        Alert.alert('You’re in', 'The driver accepted. Chat is open below.');
-      }
-    } catch (e) {
-      Alert.alert('Action failed', e instanceof Error ? e.message : 'Try again');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const openCounterModal = () => {
-    setCounterValue('');
-    setCounterModal(true);
+      if (updated.chatThreadId) { await refreshThreads(); openThread(updated.chatThreadId); }
+      if (action === 'accept') Alert.alert("You're in" ,'Chat is now open below.');
+    } catch (e) { Alert.alert('Action failed', e instanceof Error ? e.message : 'Try again'); }
+    finally { setSubmitting(false); }
   };
 
   const submitCounter = async () => {
     const n = parseFloat(counterValue.replace(/,/g, ''));
-    if (!Number.isFinite(n) || n <= 0) {
-      Alert.alert('Fare', 'Enter a valid positive amount.');
-      return;
-    }
+    if (!Number.isFinite(n) || n <= 0) { Alert.alert('Fare', 'Enter a valid positive amount.'); return; }
     setCounterModal(false);
     await runRiderAction('counter', n);
   };
 
   const openChat = async () => {
-    if (ride?.chatThreadId) {
-      await refreshThreads();
-      openThread(ride.chatThreadId);
-    }
+    if (ride?.chatThreadId) { await refreshThreads(); openThread(ride.chatThreadId); }
   };
+
+  if (loading) {
+    return (
+      <LinearGradient colors={[Neon.gradientStart, Neon.gradientMid, Neon.gradientEnd]} style={styles.bg}>
+        <View style={styles.loaderWrap}>
+          <ActivityIndicator size="large" color={Neon.accent} />
+          <Text style={styles.loaderText}>Loading ride…</Text>
+        </View>
+      </LinearGradient>
+    );
+  }
+
+  if (!ride) {
+    return (
+      <LinearGradient colors={[Neon.gradientStart, Neon.gradientMid, Neon.gradientEnd]} style={styles.bg}>
+        <View style={styles.loaderWrap}>
+          <Text style={styles.notFoundIcon}>🚫</Text>
+          <Text style={styles.notFoundText}>Ride not found</Text>
+          <Pressable onPress={() => router.back()} style={styles.backBtn}>
+            <Text style={styles.backBtnText}>← Go back</Text>
+          </Pressable>
+        </View>
+      </LinearGradient>
+    );
+  }
+
+  const taken = ride.passengerIds.length;
+  const fillPct = Math.round((taken / ride.seatCount) * 100);
 
   return (
     <LinearGradient colors={[Neon.gradientStart, Neon.gradientMid, Neon.gradientEnd]} style={styles.bg}>
+      <AnimatedBackground />
+
+      {/* COUNTER MODAL */}
       <Modal visible={counterModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>Counter offer (PKR)</Text>
+            <Text style={styles.modalTitle}>Counter Offer</Text>
+            <Text style={styles.modalSub}>Enter your fare in PKR</Text>
             <TextInput
               value={counterValue}
               onChangeText={setCounterValue}
@@ -212,51 +185,91 @@ export default function RideDetailScreen() {
               placeholderTextColor={Neon.muted}
               style={styles.modalInput}
             />
-            <View style={styles.modalRow}>
-              <Pressable onPress={() => setCounterModal(false)} style={styles.modalBtnGhost}>
-                <Text style={styles.modalBtnGhostText}>Cancel</Text>
+            <View style={styles.modalActions}>
+              <Pressable onPress={() => setCounterModal(false)} style={styles.modalCancel}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
               </Pressable>
-              <Pressable onPress={submitCounter} style={styles.modalBtn}>
-                <Text style={styles.modalBtnText}>Send</Text>
+              <Pressable onPress={submitCounter} style={styles.modalConfirm}>
+                <LinearGradient colors={[Neon.accent, '#c01920']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.modalConfirmGrad}>
+                  <Text style={styles.modalConfirmText}>Send Counter</Text>
+                </LinearGradient>
               </Pressable>
             </View>
           </View>
         </View>
       </Modal>
 
-      {loading ? (
-        <ActivityIndicator size="large" color={Neon.accent} style={styles.loader} />
-      ) : !ride ? (
-        <Text style={styles.muted}>Ride not found.</Text>
-      ) : (
-        <ScrollView contentContainerStyle={styles.scroll}>
-          <Text style={styles.route}>
-            {ride.from} → {ride.to}
-          </Text>
-          <Text style={styles.when}>{formatWhen(ride.when)}</Text>
-          <Text style={styles.seats}>
-            Seats {ride.passengerIds.length}/{ride.seatCount}
-          </Text>
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-          {IS_MAP && region && ride.fromLat != null && ride.fromLng != null ? (
+        {/* BACK */}
+        <Pressable onPress={() => router.back()} style={styles.backRow}>
+          <Text style={styles.backArrow}>‹</Text>
+          <Text style={styles.backLabel}>Rides</Text>
+        </Pressable>
+
+        {/* ROUTE HERO */}
+        <View style={styles.routeHero}>
+          <View style={styles.routeHeroInner}>
+            <View style={styles.routePoint}>
+              <View style={styles.routeDotGreen} />
+              <Text style={styles.routeCity} numberOfLines={2}>{ride.from}</Text>
+            </View>
+            <View style={styles.routeConnector}>
+              <View style={styles.routeConnectorLine} />
+              <View style={styles.routeTimePill}>
+                <Text style={styles.routeTimeText}>{timeUntil(ride.when)}</Text>
+              </View>
+              <View style={styles.routeConnectorLine} />
+            </View>
+            <View style={styles.routePoint}>
+              <View style={styles.routeDotRed} />
+              <Text style={styles.routeCity} numberOfLines={2}>{ride.to}</Text>
+            </View>
+          </View>
+          <Text style={styles.whenText}>{formatWhen(ride.when)}</Text>
+        </View>
+
+        {/* SEAT STATUS */}
+        <View style={styles.seatCard}>
+          <View style={styles.seatRow}>
+            <Text style={styles.seatTitle}>CAPACITY</Text>
+            <Text style={styles.seatFraction}>{taken} / {ride.seatCount} seats filled</Text>
+          </View>
+          <View style={styles.seatTrack}>
+            <LinearGradient
+              colors={full ? ['#ef4444', '#dc2626'] : [Neon.accent, '#ff6b6b']}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+              style={[styles.seatFill, { width: `${fillPct}%` as any }]}
+            />
+          </View>
+          <View style={styles.dotRow}>
+            {Array.from({ length: ride.seatCount }).map((_, i) => (
+              <View key={i} style={[styles.dot, i < taken ? styles.dotFilled : styles.dotEmpty]} />
+            ))}
+          </View>
+          {isDriver && <View style={styles.roleBadge}><Text style={styles.roleBadgeText}>YOU ARE DRIVING</Text></View>}
+          {already && !isDriver && <View style={[styles.roleBadge, styles.roleBadgeJoined]}><Text style={styles.roleBadgeText}>YOU'RE ON THIS RIDE ✓</Text></View>}
+          {full && !already && !isDriver && <View style={[styles.roleBadge, styles.roleBadgeFull]}><Text style={styles.roleBadgeText}>RIDE IS FULL</Text></View>}
+        </View>
+
+        {/* MAP */}
+        {IS_MAP && region && ride.fromLat != null && ride.fromLng != null && (
+          <View style={styles.mapSection}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionLine} />
+              <Text style={styles.sectionTitle}>ROUTE MAP</Text>
+              <View style={styles.sectionLine} />
+            </View>
             <View style={styles.mapWrap}>
               <MapView
                 style={styles.map}
                 initialRegion={region}
                 region={region}
                 provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}>
-                <Marker
-                  coordinate={{ latitude: ride.fromLat, longitude: ride.fromLng }}
-                  title="Pickup"
-                  pinColor="#4ade80"
-                />
-                {ride.toLat != null && ride.toLng != null ? (
+                <Marker coordinate={{ latitude: ride.fromLat, longitude: ride.fromLng }} title="Pickup" pinColor="#4ade80" />
+                {ride.toLat != null && ride.toLng != null && (
                   <>
-                    <Marker
-                      coordinate={{ latitude: ride.toLat, longitude: ride.toLng }}
-                      title="Drop-off"
-                      pinColor="#c084fc"
-                    />
+                    <Marker coordinate={{ latitude: ride.toLat, longitude: ride.toLng }} title="Drop-off" pinColor={Neon.accent} />
                     <Polyline
                       coordinates={[
                         { latitude: ride.fromLat, longitude: ride.fromLng },
@@ -266,298 +279,460 @@ export default function RideDetailScreen() {
                       strokeWidth={3}
                     />
                   </>
-                ) : null}
+                )}
               </MapView>
-            </View>
-          ) : null}
-
-          <Text style={styles.section}>Driver</Text>
-          <View style={styles.driverCard}>
-            {d?.avatarUrl ? (
-              <Image source={{ uri: d.avatarUrl }} style={styles.avatar} />
-            ) : (
-              <View style={[styles.avatar, styles.avatarPh]} />
-            )}
-            <View style={styles.driverText}>
-              <Text style={styles.driverName}>{d?.name ?? 'Unknown'}</Text>
-              {!user ? (
-                <Text style={styles.hint}>Sign in to see phone, email, and CNIC to contact the driver.</Text>
-              ) : canContact ? (
-                <>
-                  {d.phone ? (
-                    <Pressable style={styles.contactBtn} onPress={() => Linking.openURL(telUrl(d.phone!))}>
-                      <Text style={styles.contactBtnText}>Call {d.phone}</Text>
-                    </Pressable>
-                  ) : null}
-                  {d.email ? (
-                    <Pressable
-                      style={[styles.contactBtn, styles.contactBtnAlt]}
-                      onPress={() => Linking.openURL(`mailto:${d.email}`)}>
-                      <Text style={styles.contactBtnTextAlt}>Email driver</Text>
-                    </Pressable>
-                  ) : null}
-                  {d.cnic ? (
-                    <Text style={styles.cnic}>CNIC (verified at signup): {d.cnic}</Text>
-                  ) : null}
-                </>
-              ) : (
-                <Text style={styles.hint}>Contact details unavailable.</Text>
-              )}
+              <View style={styles.mapLegend}>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#4ade80' }]} /><Text style={styles.legendText}>Pickup</Text></View>
+                <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: Neon.accent }]} /><Text style={styles.legendText}>Drop-off</Text></View>
+              </View>
             </View>
           </View>
+        )}
 
-          {isDriver ? (
-            <Text style={styles.badge}>
-              You are driving this ride. Manage join requests and fares in the Inbox tab.
-            </Text>
-          ) : null}
+        {/* DRIVER CARD */}
+        <View style={styles.driverSection}>
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionLine} />
+            <Text style={styles.sectionTitle}>DRIVER</Text>
+            <View style={styles.sectionLine} />
+          </View>
+          <View style={styles.driverCard}>
+            <View style={styles.driverCardTop}>
+              {d?.avatarUrl
+                ? <Image source={{ uri: d.avatarUrl }} style={styles.driverAvatar} />
+                : <View style={styles.driverAvatarPh}><Text style={styles.driverInitial}>{d?.name?.[0] ?? '?'}</Text></View>}
+              <View style={styles.driverInfo}>
+                <Text style={styles.driverName}>{d?.name ?? 'Unknown'}</Text>
+                <View style={styles.driverBadges}>
+                  <View style={styles.driverBadge}><Text style={styles.driverBadgeText}>✓ Verified</Text></View>
+                  <View style={styles.driverBadge}><Text style={styles.driverBadgeText}>★ 5.0</Text></View>
+                </View>
+              </View>
+            </View>
 
-          {already && !isDriver ? (
-            <>
-              <Text style={styles.badge}>You’re on this ride.</Text>
-              {showRideChat ? (
-                <Pressable onPress={openChat} style={styles.chatBtn}>
-                  <Text style={styles.chatBtnText}>Open ride chat</Text>
-                </Pressable>
-              ) : ride.chatThreadId && !rideUpcoming ? (
-                <Text style={styles.hint}>Chat closed — this ride time has passed.</Text>
-              ) : !accountReady && ride.chatThreadId ? (
-                <Text style={styles.hint}>Verify your account to use ride chat.</Text>
-              ) : null}
-            </>
-          ) : null}
+            {!user ? (
+              <View style={styles.contactLocked}>
+                <Text style={styles.contactLockedIcon}>🔒</Text>
+                <Text style={styles.contactLockedText}>Sign in to view contact details</Text>
+              </View>
+            ) : canContact ? (
+              <View style={styles.contactGrid}>
+                {d?.phone && (
+                  <Pressable onPress={() => Linking.openURL(telUrl(d.phone!))} style={styles.contactBtn}>
+                    <Text style={styles.contactBtnIcon}>📞</Text>
+                    <Text style={styles.contactBtnLabel}>Call</Text>
+                    <Text style={styles.contactBtnVal} numberOfLines={1}>{d.phone}</Text>
+                  </Pressable>
+                )}
+                {d?.email && (
+                  <Pressable onPress={() => Linking.openURL(`mailto:${d.email}`)} style={[styles.contactBtn, styles.contactBtnAlt]}>
+                    <Text style={styles.contactBtnIcon}>✉️</Text>
+                    <Text style={styles.contactBtnLabel}>Email</Text>
+                    <Text style={styles.contactBtnVal} numberOfLines={1}>{d.email}</Text>
+                  </Pressable>
+                )}
+                {d?.cnic && (
+                  <View style={styles.cnicRow}>
+                    <Text style={styles.cnicLabel}>🪪 CNIC (verified)</Text>
+                    <Text style={styles.cnicVal}>{d.cnic}</Text>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <Text style={styles.contactUnavailable}>Contact details unavailable</Text>
+            )}
+          </View>
+        </View>
 
-          {full && !already && !isDriver ? <Text style={styles.badge}>This ride is full</Text> : null}
+        {/* CHAT BUTTON */}
+        {showRideChat && (
+          <Pressable onPress={openChat} style={styles.chatBtn}>
+            <LinearGradient colors={['rgba(129,140,248,0.25)', 'rgba(129,140,248,0.1)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.chatBtnGrad}>
+              <Text style={styles.chatBtnIcon}>💬</Text>
+              <Text style={styles.chatBtnText}>OPEN RIDE CHAT</Text>
+              <Text style={styles.chatBtnArrow}>›</Text>
+            </LinearGradient>
+          </Pressable>
+        )}
+        {ride.chatThreadId && !rideUpcoming && already && !isDriver && (
+          <View style={styles.chatClosed}><Text style={styles.chatClosedText}>Chat closed — ride has departed</Text></View>
+        )}
 
-          {canRequestJoin ? (
-            <View style={styles.joinBox}>
-              <Text style={styles.section}>Request a seat</Text>
-              <Text style={styles.hint}>
-                Offer a fare. The driver gets a notification and can accept or counter until you both agree.
+        {/* DRIVER INFO BOX + CANCEL */}
+        {isDriver && (
+          <>
+            <View style={styles.infoBox}>
+              <Text style={styles.infoBoxIcon}>🚗</Text>
+              <Text style={styles.infoBoxText}>Manage join requests and fares in your Inbox tab.</Text>
+            </View>
+            {!ride.cancelled && (
+              <Pressable
+                onPress={() =>
+                  Alert.alert(
+                    'Cancel this ride?',
+                    'All pending join requests will be rejected and riders will be notified.',
+                    [
+                      { text: 'Keep ride', style: 'cancel' },
+                      {
+                        text: 'Cancel ride',
+                        style: 'destructive',
+                        onPress: async () => {
+                          try {
+                            await api.cancelRide(ride.id);
+                            Alert.alert('Ride cancelled', 'Your ride has been removed.', [
+                              { text: 'OK', onPress: () => router.back() },
+                            ]);
+                          } catch (e) {
+                            Alert.alert('Failed', e instanceof Error ? e.message : 'Try again');
+                          }
+                        },
+                      },
+                    ]
+                  )
+                }
+                style={styles.cancelRideBtn}>
+                <Text style={styles.cancelRideBtnText}>✕  WITHDRAW RIDE</Text>
+              </Pressable>
+            )}
+            {ride.cancelled && (
+              <View style={styles.cancelledBadge}>
+                <Text style={styles.cancelledBadgeText}>RIDE WITHDRAWN</Text>
+              </View>
+            )}
+          </>
+        )}
+
+        {/* VERIFY CTA */}
+        {user && !accountReady && !isDriver && !already && !full && (
+          <Pressable onPress={() => router.push('/verify-account')} style={styles.verifyBanner}>
+            <Text style={styles.verifyBannerIcon}>⚡</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.verifyBannerTitle}>Verify your account</Text>
+              <Text style={styles.verifyBannerSub}>Required before requesting a seat</Text>
+            </View>
+            <Text style={styles.verifyBannerArrow}>›</Text>
+          </Pressable>
+        )}
+
+        {/* JOIN REQUEST SECTION */}
+        {canRequestJoin && (
+          <View style={styles.joinSection}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionLine} />
+              <Text style={styles.sectionTitle}>REQUEST A SEAT</Text>
+              <View style={styles.sectionLine} />
+            </View>
+            <View style={styles.joinCard}>
+              <Text style={styles.joinHint}>
+                Offer a fare — the driver can accept or counter until you both agree.
               </Text>
-              <TextInput
-                value={fareOffer}
-                onChangeText={setFareOffer}
-                keyboardType="decimal-pad"
-                placeholder="Your fare offer (PKR)"
-                placeholderTextColor={Neon.muted}
-                style={styles.input}
-              />
+              <View style={styles.fareRow}>
+                <Text style={styles.fareCurrency}>PKR</Text>
+                <TextInput
+                  value={fareOffer}
+                  onChangeText={setFareOffer}
+                  keyboardType="decimal-pad"
+                  placeholder="Enter amount"
+                  placeholderTextColor={Neon.muted}
+                  style={styles.fareInput}
+                />
+              </View>
               <Pressable
                 onPress={submitJoinRequest}
                 disabled={submitting}
-                style={({ pressed }) => [styles.join, pressed && styles.joinPressed]}>
-                <Text style={styles.joinText}>{submitting ? 'Sending…' : 'Send join request'}</Text>
+                style={({ pressed }) => [styles.joinBtn, pressed && styles.joinBtnPressed]}>
+                <LinearGradient colors={[Neon.accent, '#c01920']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.joinBtnGrad}>
+                  <Text style={styles.joinBtnText}>{submitting ? 'SENDING…' : 'SEND JOIN REQUEST'}</Text>
+                  {!submitting && <Text style={styles.joinBtnArrow}>›</Text>}
+                </LinearGradient>
               </Pressable>
             </View>
-          ) : null}
+          </View>
+        )}
 
-          {user && !accountReady && !isDriver && !already && !full ? (
-            <Pressable onPress={() => router.push('/verify-account')} style={styles.verifyBanner}>
-              <Text style={styles.verifyBannerText}>Verify your account to request a seat →</Text>
-            </Pressable>
-          ) : null}
+        {/* NEGOTIATION BOX */}
+        {jr && openJoin && !isDriver && (
+          <View style={styles.negSection}>
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionLine} />
+              <Text style={styles.sectionTitle}>YOUR REQUEST</Text>
+              <View style={styles.sectionLine} />
+            </View>
+            <View style={styles.negCard}>
+              <View style={styles.negMetaRow}>
+                <View style={styles.negMetaItem}>
+                  <Text style={styles.negMetaLabel}>STATUS</Text>
+                  <Text style={styles.negMetaVal}>{jr.status.toUpperCase()}</Text>
+                </View>
+                <View style={styles.negMetaDivider} />
+                <View style={styles.negMetaItem}>
+                  <Text style={styles.negMetaLabel}>FARE</Text>
+                  <Text style={[styles.negMetaVal, styles.negMetaValAccent]}>PKR {jr.currentFare}</Text>
+                </View>
+                <View style={styles.negMetaDivider} />
+                <View style={styles.negMetaItem}>
+                  <Text style={styles.negMetaLabel}>LAST MOVE</Text>
+                  <Text style={styles.negMetaVal}>{jr.proposedBy.toUpperCase()}</Text>
+                </View>
+              </View>
 
-          {jr && openJoin && !isDriver ? (
-            <View style={styles.negBox}>
-              <Text style={styles.section}>Your join request</Text>
-              <Text style={styles.negMeta}>
-                Status: {jr.status} · Current fare: PKR {jr.currentFare} · Last move: {jr.proposedBy}
-              </Text>
               {jr.proposedBy === 'driver' ? (
                 <>
-                  <Text style={styles.hint}>The driver proposed a fare. Accept it or counter.</Text>
-                  <View style={styles.row}>
-                    <Pressable
-                      disabled={submitting}
-                      onPress={() => runRiderAction('accept')}
-                      style={styles.smallBtn}>
-                      <Text style={styles.smallBtnText}>Accept</Text>
+                  <Text style={styles.negHint}>Driver proposed a fare. Accept or counter.</Text>
+                  <View style={styles.negActions}>
+                    <Pressable disabled={submitting} onPress={() => runRiderAction('accept')} style={styles.negAccept}>
+                      <LinearGradient colors={['#16a34a', '#15803d']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.negBtnGrad}>
+                        <Text style={styles.negBtnText}>✓ ACCEPT</Text>
+                      </LinearGradient>
                     </Pressable>
-                    <Pressable
-                      disabled={submitting}
-                      onPress={openCounterModal}
-                      style={styles.smallBtnAlt}>
-                      <Text style={styles.smallBtnAltText}>Counter</Text>
+                    <Pressable disabled={submitting} onPress={() => { setCounterValue(''); setCounterModal(true); }} style={styles.negCounter}>
+                      <Text style={styles.negCounterText}>↔ COUNTER</Text>
                     </Pressable>
-                    <Pressable
-                      disabled={submitting}
-                      onPress={() => runRiderAction('withdraw')}
-                      style={styles.smallBtnGhost}>
-                      <Text style={styles.smallBtnGhostText}>Withdraw</Text>
+                    <Pressable disabled={submitting} onPress={() => runRiderAction('withdraw')} style={styles.negWithdraw}>
+                      <Text style={styles.negWithdrawText}>✗</Text>
                     </Pressable>
                   </View>
                 </>
               ) : (
-                <Text style={styles.hint}>Waiting for the driver to accept or counter your offer.</Text>
+                <View style={styles.negWaiting}>
+                  <ActivityIndicator size="small" color={Neon.accent} />
+                  <Text style={styles.negWaitingText}>Waiting for driver to respond…</Text>
+                </View>
               )}
             </View>
-          ) : null}
+          </View>
+        )}
 
-          <Pressable onPress={() => router.back()} style={styles.back}>
-            <Text style={styles.backText}>← Back</Text>
-          </Pressable>
-        </ScrollView>
-      )}
+      </ScrollView>
     </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
   bg: { flex: 1 },
-  loader: { marginTop: 80 },
-  muted: { color: Neon.muted, padding: 24 },
-  scroll: { padding: 20, paddingTop: 16, paddingBottom: 120 },
-  route: { fontSize: 22, fontWeight: '800', color: Neon.text, marginBottom: 8 },
-  when: { color: Neon.muted, fontSize: 16, marginBottom: 4 },
-  seats: { color: Neon.accentSoft, marginBottom: 16 },
-  mapWrap: {
-    height: 220,
-    borderRadius: 16,
-    overflow: 'hidden',
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: Neon.border,
-  },
-  map: { ...StyleSheet.absoluteFillObject },
-  section: { fontSize: 18, fontWeight: '700', color: Neon.text, marginBottom: 10 },
-  driverCard: {
-    flexDirection: 'row',
-    gap: 14,
-    padding: 16,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: Neon.border,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    marginBottom: 20,
-  },
-  avatar: { width: 72, height: 72, borderRadius: 16, borderWidth: 1, borderColor: Neon.border },
-  avatarPh: { backgroundColor: 'rgba(168,85,247,0.2)' },
-  driverText: { flex: 1 },
-  driverName: { fontSize: 18, fontWeight: '700', color: Neon.text, marginBottom: 8 },
-  hint: { color: Neon.muted, fontSize: 14, lineHeight: 20 },
-  cnic: { color: Neon.muted, fontSize: 13, marginTop: 8 },
-  contactBtn: {
-    backgroundColor: 'rgba(168,85,247,0.35)',
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: Neon.border,
-  },
-  contactBtnAlt: {
-    backgroundColor: 'rgba(129,140,248,0.25)',
-  },
-  contactBtnText: { color: Neon.text, fontWeight: '700' },
-  contactBtnTextAlt: { color: Neon.accentBlue, fontWeight: '700' },
-  joinBox: { marginBottom: 20 },
-  input: {
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1,
-    borderColor: Neon.border,
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    color: Neon.text,
-    fontSize: 16,
-    marginBottom: 12,
-  },
-  join: {
-    backgroundColor: Neon.accent,
-    paddingVertical: 16,
-    borderRadius: 14,
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  joinPressed: { opacity: 0.9 },
-  joinText: { color: Neon.onAccent, fontWeight: '800', fontSize: 16 },
-  badge: { color: Neon.accentSoft, marginBottom: 12, fontWeight: '600', lineHeight: 22 },
-  chatBtn: {
-    borderWidth: 1,
-    borderColor: Neon.border,
-    paddingVertical: 14,
-    borderRadius: 14,
-    alignItems: 'center',
-    marginBottom: 16,
-    backgroundColor: 'rgba(129,140,248,0.2)',
-  },
-  chatBtnText: { color: Neon.accentBlue, fontWeight: '700' },
-  verifyBanner: {
-    padding: 14,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: Neon.accent,
-    marginBottom: 16,
-  },
-  verifyBannerText: { color: Neon.accent, fontWeight: '700', textAlign: 'center' },
-  negBox: {
-    padding: 16,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: Neon.border,
+  loaderWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14 },
+  loaderText: { color: Neon.muted, fontSize: 14 },
+  notFoundIcon: { fontSize: 48 },
+  notFoundText: { color: Neon.text, fontSize: 18, fontWeight: '700' },
+  backBtn: { marginTop: 16 },
+  backBtnText: { color: Neon.accentSoft, fontWeight: '600', fontSize: 15 },
+
+  scroll: { paddingBottom: 140 },
+
+  /* BACK */
+  backRow: { flexDirection: 'row', alignItems: 'center', paddingTop: 56, paddingHorizontal: 20, paddingBottom: 12, gap: 4 },
+  backArrow: { color: Neon.accent, fontSize: 28, fontWeight: '300', lineHeight: 32 },
+  backLabel: { color: Neon.accentSoft, fontSize: 15, fontWeight: '600' },
+
+  /* ROUTE HERO */
+  routeHero: {
+    marginHorizontal: 20, marginBottom: 16,
     backgroundColor: 'rgba(255,255,255,0.04)',
-    marginBottom: 20,
+    borderWidth: 1, borderColor: 'rgba(232,33,39,0.2)',
+    borderRadius: 20, padding: 20,
   },
-  negMeta: { color: Neon.muted, marginBottom: 10 },
-  row: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 8 },
-  smallBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    backgroundColor: Neon.accent,
+  routeHeroInner: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+  routePoint: { flex: 1, alignItems: 'center', gap: 8 },
+  routeDotGreen: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#4ade80', borderWidth: 2, borderColor: 'rgba(74,222,128,0.3)' },
+  routeDotRed: { width: 12, height: 12, borderRadius: 6, backgroundColor: Neon.accent, borderWidth: 2, borderColor: 'rgba(232,33,39,0.3)' },
+  routeCity: { color: Neon.text, fontSize: 14, fontWeight: '700', textAlign: 'center' },
+  routeConnector: { flex: 1, alignItems: 'center', gap: 4 },
+  routeConnectorLine: { flex: 1, height: 1, backgroundColor: 'rgba(232,33,39,0.3)', width: '100%' },
+  routeTimePill: {
+    backgroundColor: 'rgba(232,33,39,0.15)', borderWidth: 1,
+    borderColor: 'rgba(232,33,39,0.3)', borderRadius: 10,
+    paddingHorizontal: 8, paddingVertical: 3,
   },
-  smallBtnText: { color: Neon.onAccent, fontWeight: '800' },
-  smallBtnAlt: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Neon.border,
-    backgroundColor: 'rgba(168,85,247,0.25)',
+  routeTimeText: { color: Neon.accent, fontSize: 11, fontWeight: '800', letterSpacing: 0.5 },
+  whenText: { color: Neon.muted, fontSize: 13, textAlign: 'center' },
+
+  /* SEAT CARD */
+  seatCard: {
+    marginHorizontal: 20, marginBottom: 20,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderWidth: 1, borderColor: Neon.border,
+    borderRadius: 16, padding: 16,
   },
-  smallBtnAltText: { color: Neon.text, fontWeight: '700' },
-  smallBtnGhost: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: Neon.border,
+  seatRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
+  seatTitle: { color: Neon.muted, fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
+  seatFraction: { color: Neon.accentSoft, fontSize: 12, fontWeight: '600' },
+  seatTrack: { height: 4, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 4, overflow: 'hidden', marginBottom: 10 },
+  seatFill: { height: '100%', borderRadius: 4 },
+  dotRow: { flexDirection: 'row', gap: 6, marginBottom: 10 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  dotFilled: { backgroundColor: Neon.accent },
+  dotEmpty: { backgroundColor: 'rgba(255,255,255,0.1)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)' },
+  roleBadge: {
+    alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 8, borderWidth: 1,
+    borderColor: 'rgba(161,161,170,0.3)', backgroundColor: 'rgba(161,161,170,0.1)',
   },
-  smallBtnGhostText: { color: Neon.muted, fontWeight: '600' },
-  back: { marginTop: 8 },
-  backText: { color: Neon.accentBlue, fontSize: 16, fontWeight: '600' },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    padding: 24,
+  roleBadgeJoined: { borderColor: 'rgba(74,222,128,0.4)', backgroundColor: 'rgba(74,222,128,0.1)' },
+  roleBadgeFull: { borderColor: 'rgba(113,113,122,0.3)', backgroundColor: 'rgba(113,113,122,0.08)' },
+  roleBadgeText: { color: Neon.accentSoft, fontSize: 9, fontWeight: '900', letterSpacing: 1.2 },
+
+  /* MAP */
+  mapSection: { marginBottom: 20 },
+  mapWrap: { marginHorizontal: 20, height: 220, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(232,33,39,0.25)' },
+  map: { ...StyleSheet.absoluteFillObject },
+  mapLegend: {
+    position: 'absolute', bottom: 10, left: 10,
+    flexDirection: 'row', gap: 12,
+    backgroundColor: 'rgba(13,13,15,0.85)', borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderWidth: 1, borderColor: Neon.border,
   },
-  modalBox: {
-    backgroundColor: Neon.bgElevated,
-    borderRadius: 16,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: Neon.border,
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { color: Neon.accentSoft, fontSize: 11, fontWeight: '600' },
+
+  /* SECTION HEADER */
+  sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 20, marginBottom: 12 },
+  sectionLine: { flex: 1, height: 1, backgroundColor: Neon.border },
+  sectionTitle: { color: Neon.muted, fontSize: 10, fontWeight: '800', letterSpacing: 2 },
+
+  /* DRIVER CARD */
+  driverSection: { marginBottom: 20 },
+  driverCard: {
+    marginHorizontal: 20,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1, borderColor: Neon.border,
+    borderRadius: 18, overflow: 'hidden',
   },
-  modalTitle: { color: Neon.text, fontWeight: '800', fontSize: 17, marginBottom: 12 },
+  driverCardTop: { flexDirection: 'row', gap: 14, padding: 16, alignItems: 'center' },
+  driverAvatar: { width: 64, height: 64, borderRadius: 32, borderWidth: 2, borderColor: 'rgba(232,33,39,0.4)' },
+  driverAvatarPh: {
+    width: 64, height: 64, borderRadius: 32,
+    backgroundColor: 'rgba(232,33,39,0.12)',
+    borderWidth: 2, borderColor: 'rgba(232,33,39,0.3)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  driverInitial: { color: Neon.accent, fontSize: 24, fontWeight: '900' },
+  driverInfo: { flex: 1, gap: 6 },
+  driverName: { color: Neon.text, fontSize: 18, fontWeight: '800' },
+  driverBadges: { flexDirection: 'row', gap: 6 },
+  driverBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, backgroundColor: 'rgba(74,222,128,0.12)', borderWidth: 1, borderColor: 'rgba(74,222,128,0.25)' },
+  driverBadgeText: { color: '#4ade80', fontSize: 11, fontWeight: '700' },
+  contactLocked: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.05)' },
+  contactLockedIcon: { fontSize: 18 },
+  contactLockedText: { color: Neon.muted, fontSize: 14 },
+  contactGrid: { padding: 12, gap: 10, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.05)' },
+  contactBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12,
+    backgroundColor: 'rgba(232,33,39,0.08)', borderRadius: 12,
+    borderWidth: 1, borderColor: 'rgba(232,33,39,0.2)',
+  },
+  contactBtnAlt: { backgroundColor: 'rgba(129,140,248,0.08)', borderColor: 'rgba(129,140,248,0.2)' },
+  contactBtnIcon: { fontSize: 18 },
+  contactBtnLabel: { color: Neon.muted, fontSize: 11, fontWeight: '600', width: 36 },
+  contactBtnVal: { flex: 1, color: Neon.text, fontSize: 14, fontWeight: '600' },
+  cnicRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 4 },
+  cnicLabel: { color: Neon.muted, fontSize: 12, fontWeight: '600' },
+  cnicVal: { color: Neon.accentSoft, fontSize: 13, fontWeight: '600' },
+  contactUnavailable: { color: Neon.muted, fontSize: 14, padding: 16, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.05)' },
+
+  /* CHAT */
+  chatBtn: { marginHorizontal: 20, marginBottom: 16, borderRadius: 16, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(129,140,248,0.3)' },
+  chatBtnGrad: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 16, gap: 10 },
+  chatBtnIcon: { fontSize: 18 },
+  chatBtnText: { flex: 1, color: '#818cf8', fontWeight: '800', fontSize: 13, letterSpacing: 1 },
+  chatBtnArrow: { color: '#818cf8', fontSize: 22, fontWeight: '700' },
+  chatClosed: { marginHorizontal: 20, marginBottom: 16, padding: 12, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.03)', borderWidth: 1, borderColor: Neon.border },
+  chatClosedText: { color: Neon.muted, fontSize: 13, textAlign: 'center' },
+
+  /* INFO BOX */
+  infoBox: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    marginHorizontal: 20, marginBottom: 16, padding: 14,
+    backgroundColor: 'rgba(255,255,255,0.03)', borderRadius: 14, borderWidth: 1, borderColor: Neon.border,
+  },
+  infoBoxIcon: { fontSize: 20 },
+  infoBoxText: { flex: 1, color: Neon.muted, fontSize: 14, lineHeight: 20 },
+
+  /* VERIFY BANNER */
+  verifyBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    marginHorizontal: 20, marginBottom: 16, padding: 14,
+    backgroundColor: 'rgba(232,33,39,0.08)', borderRadius: 14,
+    borderWidth: 1, borderColor: 'rgba(232,33,39,0.3)',
+  },
+  verifyBannerIcon: { fontSize: 20 },
+  verifyBannerTitle: { color: Neon.accent, fontWeight: '800', fontSize: 14 },
+  verifyBannerSub: { color: Neon.muted, fontSize: 12, marginTop: 2 },
+  verifyBannerArrow: { color: Neon.accent, fontSize: 22, fontWeight: '700' },
+
+  /* JOIN SECTION */
+  joinSection: { marginBottom: 20 },
+  joinCard: { marginHorizontal: 20, backgroundColor: 'rgba(255,255,255,0.03)', borderWidth: 1, borderColor: Neon.border, borderRadius: 18, padding: 18 },
+  joinHint: { color: Neon.muted, fontSize: 13, lineHeight: 20, marginBottom: 16 },
+  fareRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: Neon.border,
+    borderRadius: 14, paddingHorizontal: 16, marginBottom: 14, overflow: 'hidden',
+  },
+  fareCurrency: { color: Neon.accent, fontWeight: '800', fontSize: 16, marginRight: 8 },
+  fareInput: { flex: 1, paddingVertical: 14, color: Neon.text, fontSize: 22, fontWeight: '700' },
+  joinBtn: { borderRadius: 14, overflow: 'hidden' },
+  joinBtnPressed: { opacity: 0.88 },
+  joinBtnGrad: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 15, gap: 6 },
+  joinBtnText: { color: '#fff', fontWeight: '900', fontSize: 14, letterSpacing: 1.2 },
+  joinBtnArrow: { color: '#fff', fontSize: 22, fontWeight: '900' },
+
+  /* NEGOTIATION */
+  negSection: { marginBottom: 20 },
+  negCard: { marginHorizontal: 20, backgroundColor: 'rgba(255,255,255,0.03)', borderWidth: 1, borderColor: Neon.border, borderRadius: 18, padding: 16 },
+  negMetaRow: { flexDirection: 'row', marginBottom: 14 },
+  negMetaItem: { flex: 1, alignItems: 'center', gap: 4 },
+  negMetaDivider: { width: 1, backgroundColor: Neon.border },
+  negMetaLabel: { color: Neon.muted, fontSize: 9, fontWeight: '800', letterSpacing: 1 },
+  negMetaVal: { color: Neon.text, fontSize: 13, fontWeight: '800' },
+  negMetaValAccent: { color: Neon.accent },
+  negHint: { color: Neon.muted, fontSize: 13, marginBottom: 14 },
+  negActions: { flexDirection: 'row', gap: 8 },
+  negAccept: { flex: 2, borderRadius: 12, overflow: 'hidden' },
+  negBtnGrad: { paddingVertical: 12, alignItems: 'center' },
+  negBtnText: { color: '#fff', fontWeight: '900', fontSize: 12, letterSpacing: 1 },
+  negCounter: {
+    flex: 2, borderRadius: 12, paddingVertical: 12, alignItems: 'center',
+    borderWidth: 1, borderColor: Neon.border, backgroundColor: 'rgba(255,255,255,0.05)',
+  },
+  negCounterText: { color: Neon.accentSoft, fontWeight: '800', fontSize: 12, letterSpacing: 0.5 },
+  negWithdraw: {
+    width: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'rgba(239,68,68,0.3)', backgroundColor: 'rgba(239,68,68,0.08)',
+  },
+  negWithdrawText: { color: '#ef4444', fontSize: 16, fontWeight: '800' },
+  negWaiting: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingTop: 4 },
+  negWaitingText: { color: Neon.muted, fontSize: 13 },
+
+  cancelRideBtn: {
+    marginHorizontal: 20, marginBottom: 16, paddingVertical: 14,
+    borderRadius: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: 'rgba(239,68,68,0.4)',
+    backgroundColor: 'rgba(239,68,68,0.08)',
+  },
+  cancelRideBtnText: { color: '#ef4444', fontWeight: '900', fontSize: 13, letterSpacing: 1.2 },
+  cancelledBadge: {
+    marginHorizontal: 20, marginBottom: 16, paddingVertical: 12,
+    borderRadius: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: 'rgba(113,113,122,0.3)',
+    backgroundColor: 'rgba(113,113,122,0.08)',
+  },
+  cancelledBadgeText: { color: Neon.muted, fontWeight: '900', fontSize: 12, letterSpacing: 1.5 },
+
+  /* MODAL */
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', padding: 24 },
+  modalBox: { backgroundColor: Neon.bgElevated, borderRadius: 20, padding: 22, borderWidth: 1, borderColor: 'rgba(232,33,39,0.25)' },
+  modalTitle: { color: Neon.text, fontWeight: '900', fontSize: 18, marginBottom: 4 },
+  modalSub: { color: Neon.muted, fontSize: 13, marginBottom: 16 },
   modalInput: {
-    borderWidth: 1,
-    borderColor: Neon.border,
-    borderRadius: 12,
-    padding: 14,
-    color: Neon.text,
-    fontSize: 16,
-    marginBottom: 16,
+    backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: Neon.border,
+    borderRadius: 14, padding: 14, color: Neon.text, fontSize: 20, fontWeight: '700', marginBottom: 18,
   },
-  modalRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 12 },
-  modalBtnGhost: { paddingVertical: 10, paddingHorizontal: 14 },
-  modalBtnGhostText: { color: Neon.muted, fontWeight: '600' },
-  modalBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 12,
-    backgroundColor: Neon.accent,
-  },
-  modalBtnText: { color: Neon.onAccent, fontWeight: '800' },
+  modalActions: { flexDirection: 'row', gap: 10 },
+  modalCancel: { flex: 1, paddingVertical: 14, alignItems: 'center', borderRadius: 14, borderWidth: 1, borderColor: Neon.border },
+  modalCancelText: { color: Neon.muted, fontWeight: '700' },
+  modalConfirm: { flex: 2, borderRadius: 14, overflow: 'hidden' },
+  modalConfirmGrad: { paddingVertical: 14, alignItems: 'center' },
+  modalConfirmText: { color: '#fff', fontWeight: '900', fontSize: 14, letterSpacing: 0.5 },
 });

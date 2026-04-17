@@ -14,6 +14,7 @@ const Ride = require('./models/Ride');
 const JoinRequest = require('./models/JoinRequest');
 const ChatThread = require('./models/ChatThread');
 const Notification = require('./models/Notification');
+const Review = require('./models/Review');
 const { authMiddleware, optionalAuth } = require('./middleware/auth');
 const { requireAccountReady } = require('./middleware/requireAccountReady');
 const { haversineKm } = require('./utils/geo');
@@ -133,6 +134,7 @@ function serializeRide(r, base, { distanceKm, driverContact } = {}) {
     fromLng: r.fromLng != null ? r.fromLng : null,
     toLat: r.toLat != null ? r.toLat : null,
     toLng: r.toLng != null ? r.toLng : null,
+    cancelled: !!r.cancelled,
     driver: driverPublic(r.driver, base, driverContact),
   };
   if (distanceKm != null && Number.isFinite(distanceKm)) {
@@ -154,6 +156,8 @@ function userResponse(u, base) {
     emailVerified: !!u.emailVerified,
     phoneVerified: !!u.phoneVerified,
     cnicDocumentUploaded: !!u.cnicDocumentPath,
+    ratingAvg: u.ratingAvg ?? null,
+    ratingCount: u.ratingCount ?? 0,
   };
 }
 
@@ -491,7 +495,7 @@ app.get('/api/rides', async (req, res) => {
     const now = new Date();
     const lat = parseFloat(req.query.lat);
     const lng = parseFloat(req.query.lng);
-    const rides = await Ride.find({ when: { $gte: now } })
+    const rides = await Ride.find({ when: { $gte: now }, cancelled: { $ne: true } })
       .sort({ when: 1 })
       .populate('driver', 'name email phone avatarPath cnic')
       .lean();
@@ -901,7 +905,7 @@ app.post('/api/join-requests/:jrId/rider-action', authMiddleware, requireAccount
       jr.status = 'negotiating';
       await jr.save();
       await createJoinNotification(
-        ride.driver,
+        jr.ride.driver,
         'Rider countered your fare',
         `${jr.rider.name} proposed PKR ${jr.currentFare}.`,
         jr.ride._id,
@@ -972,6 +976,166 @@ app.post('/api/chat/threads/:tid/messages', authMiddleware, requireAccountReady,
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// ── GET /api/me/rides  — rides offered by the logged-in driver ──────────────
+app.get('/api/me/rides', authMiddleware, async (req, res) => {
+  try {
+    const rides = await Ride.find({ driver: req.userId })
+      .populate('driver', 'name email phone avatarPath cnic')
+      .sort({ when: -1 })
+      .lean();
+    const base = baseUrl(req);
+    res.json(rides.map((r) => serializeRide(r, base, { driverContact: true })));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to load your rides' });
+  }
+});
+
+// ── DELETE /api/rides/:id  — driver cancels their ride ──────────────────────
+app.delete('/api/rides/:id', authMiddleware, requireAccountReady, async (req, res) => {
+  try {
+    const ride = await Ride.findById(req.params.id).populate('driver', 'name');
+    if (!ride) return res.status(404).json({ error: 'Ride not found' });
+    if (!ride.driver) return res.status(404).json({ error: 'Ride driver not found' });
+    if (ride.driver._id.toString() !== req.userId) {
+      return res.status(403).json({ error: 'Only the driver can cancel this ride' });
+    }
+    if (ride.cancelled) return res.status(400).json({ error: 'Ride already cancelled' });
+
+    ride.cancelled = true;
+    await ride.save();
+
+    // Cancel all open join requests and notify riders
+    const openJRs = await JoinRequest.find({
+      ride: ride._id,
+      status: { $in: ['pending', 'negotiating'] },
+    }).populate('rider', 'name');
+
+    await JoinRequest.updateMany(
+      { ride: ride._id, status: { $in: ['pending', 'negotiating'] } },
+      { $set: { status: 'rejected' } }
+    );
+
+    for (const jr of openJRs) {
+      if (jr.rider && jr.rider._id) {
+        await Notification.create({
+          user: jr.rider._id,
+          kind: 'ride_cancelled',
+          title: 'Ride cancelled',
+          message: `The driver cancelled the ride from ${ride.from} to ${ride.to}.`,
+          ride: ride._id,
+          joinRequest: jr._id,
+        });
+      }
+    }
+
+    res.json({ ok: true, id: ride._id.toString() });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to cancel ride' });
+  }
+});
+
+// ── POST /api/rides/:id/reviews  — submit a review after a ride ─────────────
+app.post('/api/rides/:id/reviews', authMiddleware, requireAccountReady, async (req, res) => {
+  try {
+    const ride = await Ride.findById(req.params.id).populate('driver', 'name');
+    if (!ride) return res.status(404).json({ error: 'Ride not found' });
+
+    const uid = req.userId;
+    const isDriver  = ride.driver._id.toString() === uid;
+    const isPassenger = (ride.passengers || []).some((p) => p.toString() === uid);
+
+    if (!isDriver && !isPassenger) {
+      return res.status(403).json({ error: 'Only the driver or a passenger can leave a review' });
+    }
+
+    const { rating, comment, revieweeId } = req.body || {};
+    const r = Number(rating);
+    if (!Number.isFinite(r) || r < 1 || r > 5) {
+      return res.status(400).json({ error: 'rating must be 1–5' });
+    }
+    if (!revieweeId) {
+      return res.status(400).json({ error: 'revieweeId is required' });
+    }
+
+    // Validate reviewee is the other party
+    if (isPassenger && ride.driver._id.toString() !== revieweeId) {
+      return res.status(400).json({ error: 'Passengers can only review the driver' });
+    }
+    if (isDriver && !(ride.passengers || []).some((p) => p.toString() === revieweeId)) {
+      return res.status(400).json({ error: 'Driver can only review their passengers' });
+    }
+
+    const review = await Review.create({
+      ride: ride._id,
+      reviewer: uid,
+      reviewee: revieweeId,
+      rating: Math.round(r),
+      comment: String(comment || '').trim().slice(0, 500),
+      role: isPassenger ? 'driver' : 'rider',
+    });
+
+    // Update reviewee's cached rating on User doc (optional denorm)
+    const stats = await Review.aggregate([
+      { $match: { reviewee: review.reviewee } },
+      { $group: { _id: '$reviewee', avg: { $avg: '$rating' }, count: { $sum: 1 } } },
+    ]);
+    if (stats.length) {
+      await User.findByIdAndUpdate(review.reviewee, {
+        ratingAvg: Math.round(stats[0].avg * 10) / 10,
+        ratingCount: stats[0].count,
+      });
+    }
+
+    res.status(201).json({
+      id: review._id.toString(),
+      rideId: ride._id.toString(),
+      reviewerId: uid,
+      revieweeId: revieweeId,
+      rating: review.rating,
+      comment: review.comment,
+      role: review.role,
+      createdAt: review.createdAt,
+    });
+  } catch (e) {
+    if (e && e.code === 11000) {
+      return res.status(409).json({ error: 'You have already reviewed this ride' });
+    }
+    console.error(e);
+    res.status(500).json({ error: 'Failed to submit review' });
+  }
+});
+
+// ── GET /api/users/:id/reviews  — reviews received by a user ────────────────
+app.get('/api/users/:id/reviews', async (req, res) => {
+  try {
+    const reviews = await Review.find({ reviewee: req.params.id })
+      .populate('reviewer', 'name avatarPath')
+      .populate('ride', 'from to when')
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    const base = baseUrl(req);
+    res.json(reviews.map((rv) => ({
+      id: rv._id.toString(),
+      rating: rv.rating,
+      comment: rv.comment,
+      role: rv.role,
+      createdAt: rv.createdAt,
+      ride: rv.ride ? { id: rv.ride._id.toString(), from: rv.ride.from, to: rv.ride.to, when: rv.ride.when } : null,
+      reviewer: rv.reviewer ? {
+        id: rv.reviewer._id.toString(),
+        name: rv.reviewer.name,
+        avatarUrl: rv.reviewer.avatarPath ? `${base}${rv.reviewer.avatarPath}` : null,
+      } : null,
+    })));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to load reviews' });
   }
 });
 
