@@ -13,6 +13,10 @@ const rideSchema = new mongoose.Schema(
     toLat:     { type: Number, default: null },
     toLng:     { type: Number, default: null },
     cancelled: { type: Boolean, default: false },
+    status: { type: String, enum: ['scheduled', 'active', 'completed'], default: 'scheduled' },
+    liveDriverLat: { type: Number, default: null },
+    liveDriverLng: { type: Number, default: null },
+    startedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

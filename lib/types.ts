@@ -20,6 +20,8 @@ export type DriverSummary = {
   email?: string;
   phone?: string;
   cnic?: string;
+  ratingAvg?: number | null;
+  ratingCount?: number;
 };
 
 export type JoinRequestSummary = {
@@ -48,6 +50,9 @@ export type Ride = {
   toLng: number | null;
   distanceKm?: number;
   cancelled?: boolean;
+  status?: 'scheduled' | 'active' | 'completed';
+  liveDriverLat?: number | null;
+  liveDriverLng?: number | null;
   driver: DriverSummary | null;
   myJoinRequest?: JoinRequestSummary | null;
   chatThreadId?: string | null;

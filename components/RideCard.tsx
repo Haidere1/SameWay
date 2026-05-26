@@ -31,9 +31,10 @@ type Props = {
   currentUserId: string | null;
   onJoin: () => void;
   onOpenDetail: () => void;
+  onViewDriverProfile?: () => void;
 };
 
-export function RideCard({ ride, currentUserId, onJoin, onOpenDetail }: Props) {
+export function RideCard({ ride, currentUserId, onJoin, onOpenDetail, onViewDriverProfile }: Props) {
   const scale = useSharedValue(1);
   const animatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
@@ -59,12 +60,12 @@ export function RideCard({ ride, currentUserId, onJoin, onOpenDetail }: Props) {
 
           {/* TOP ROW */}
           <View style={styles.topRow}>
-            <View style={styles.avatarWrap}>
+            <Pressable onPress={onViewDriverProfile} style={styles.avatarWrap} hitSlop={6}>
               {ride.driver?.avatarUrl
                 ? <Image source={{ uri: ride.driver.avatarUrl }} style={styles.avatar} />
                 : <View style={styles.avatarPh}><Text style={styles.avatarInitial}>{ride.driver?.name?.[0] ?? '?'}</Text></View>}
               <View style={styles.onlineDot} />
-            </View>
+            </Pressable>
             <View style={styles.routeCol}>
               <Text style={styles.route} numberOfLines={1}>{ride.from}</Text>
               <View style={styles.arrowRow}>
@@ -82,9 +83,14 @@ export function RideCard({ ride, currentUserId, onJoin, onOpenDetail }: Props) {
 
           {/* META ROW */}
           <View style={styles.metaRow}>
-            <View style={styles.metaChip}>
+            <Pressable onPress={onViewDriverProfile} style={styles.metaChip}>
               <Text style={styles.metaChipText}>👤 {ride.driver?.name ?? 'Unknown'}</Text>
-            </View>
+            </Pressable>
+            {ride.driver?.ratingAvg != null && (
+              <Pressable onPress={onViewDriverProfile} style={[styles.metaChip, styles.metaChipStar]}>
+                <Text style={styles.metaChipStarText}>★ {ride.driver.ratingAvg.toFixed(1)}</Text>
+              </Pressable>
+            )}
             <View style={styles.metaChip}>
               <Text style={styles.metaChipText}>🗓 {formatWhen(ride.when)}</Text>
             </View>
@@ -191,8 +197,10 @@ const styles = StyleSheet.create({
     borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4,
   },
   metaChipAccent: { borderColor: 'rgba(232,33,39,0.3)', backgroundColor: 'rgba(232,33,39,0.08)' },
+  metaChipStar: { borderColor: 'rgba(250,204,21,0.35)', backgroundColor: 'rgba(250,204,21,0.08)' },
   metaChipText: { color: Neon.muted, fontSize: 11, fontWeight: '600' },
   metaChipTextAccent: { color: Neon.accent },
+  metaChipStarText: { color: '#facc15', fontSize: 11, fontWeight: '700' },
 
   /* SEAT BAR */
   seatSection: { marginBottom: 10 },

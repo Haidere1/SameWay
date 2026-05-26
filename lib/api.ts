@@ -329,3 +329,42 @@ export async function fetchUserReviews(userId: string): Promise<Review[]> {
   });
   return parseJson(res);
 }
+
+export async function fetchMyPassengerRides(): Promise<Ride[]> {
+  const res = await fetch(`${API_BASE}/api/me/passenger-rides`, {
+    headers: { Accept: 'application/json', ...(await authHeader()) },
+  });
+  return parseJson(res);
+}
+
+export async function startRide(rideId: string): Promise<Ride> {
+  const res = await fetch(`${API_BASE}/api/rides/${rideId}/start`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', ...(await authHeader()) },
+  });
+  return parseJson(res);
+}
+
+export async function endRide(rideId: string): Promise<Ride> {
+  const res = await fetch(`${API_BASE}/api/rides/${rideId}/end`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', ...(await authHeader()) },
+  });
+  return parseJson(res);
+}
+
+export async function updateDriverLocation(rideId: string, lat: number, lng: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_BASE}/api/rides/${rideId}/location`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+    body: JSON.stringify({ lat, lng }),
+  });
+  return parseJson(res);
+}
+
+export async function fetchRideLocation(rideId: string): Promise<{ status: string; liveDriverLat: number | null; liveDriverLng: number | null }> {
+  const res = await fetch(`${API_BASE}/api/rides/${rideId}/location`, {
+    headers: { Accept: 'application/json', ...(await authHeader()) },
+  });
+  return parseJson(res);
+}

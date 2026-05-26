@@ -1,7 +1,9 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Location from 'expo-location';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,6 +20,7 @@ import {
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 
 import { AnimatedBackground } from '@/components/AnimatedBackground';
+import { DriverProfileModal } from '@/components/DriverProfileModal';
 import { Neon } from '@/constants/theme';
 import { useAuth } from '@/contexts/AuthContext';
 import { useChat } from '@/contexts/ChatContext';
@@ -58,6 +61,15 @@ export default function RideDetailScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [counterModal, setCounterModal] = useState(false);
   const [counterValue, setCounterValue] = useState('');
+  const [liveDriverLoc, setLiveDriverLoc] = useState<{ lat: number; lng: number } | null>(null);
+  const [rideActionBusy, setRideActionBusy] = useState(false);
+  const trackingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [showReview, setShowReview] = useState(false);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState('');
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [hasReviewed, setHasReviewed] = useState(false);
+  const [showDriverProfile, setShowDriverProfile] = useState(false);
 
   const accountReady = user?.accountReady === true;
 
@@ -65,6 +77,9 @@ export default function RideDetailScreen() {
     if (!id) return;
     const data = await api.fetchRide(id);
     setRide(data);
+    if (data.liveDriverLat != null && data.liveDriverLng != null) {
+      setLiveDriverLoc({ lat: data.liveDriverLat, lng: data.liveDriverLng });
+    }
   }, [id]);
 
   useEffect(() => {
@@ -78,27 +93,168 @@ export default function RideDetailScreen() {
     return () => { alive = false; };
   }, [id, load]);
 
+  const accountReady2 = user?.accountReady === true;
+  const d = ride?.driver;
+  const isDriver = !!(user && ride && d && user.id === d.id);
+  const already = !!(user && ride && ride.passengerIds.includes(user.id));
+  const rideStatus = ride?.status ?? 'scheduled';
+  const isActive = rideStatus === 'active';
+
+  // Driver: track and push live location while ride is active
+  useEffect(() => {
+    if (!isDriver || !isActive || !ride?.id) return;
+
+    let alive = true;
+
+    const startTracking = async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Allow location access so passengers can track the ride.');
+        return;
+      }
+
+      const push = async () => {
+        try {
+          const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+          const { latitude, longitude } = loc.coords;
+          if (!alive) return;
+          setLiveDriverLoc({ lat: latitude, lng: longitude });
+          await api.updateDriverLocation(ride.id, latitude, longitude);
+        } catch { /* silent — keep trying */ }
+      };
+
+      await push();
+      trackingIntervalRef.current = setInterval(push, 10000);
+    };
+
+    startTracking();
+    return () => {
+      alive = false;
+      if (trackingIntervalRef.current) { clearInterval(trackingIntervalRef.current); trackingIntervalRef.current = null; }
+    };
+  }, [isDriver, isActive, ride?.id]);
+
+  // Passenger: poll live driver location while ride is active
+  useEffect(() => {
+    if (!already || isDriver || !isActive || !ride?.id) return;
+
+    const poll = async () => {
+      try {
+        const loc = await api.fetchRideLocation(ride.id);
+        if (loc.liveDriverLat != null && loc.liveDriverLng != null) {
+          setLiveDriverLoc({ lat: loc.liveDriverLat, lng: loc.liveDriverLng });
+        }
+      } catch { /* silent */ }
+    };
+
+    poll();
+    const id2 = setInterval(poll, 8000);
+    return () => clearInterval(id2);
+  }, [already, isDriver, isActive, ride?.id]);
+
+  // Passenger: poll ride status to detect when driver starts or ends
+  useEffect(() => {
+    if (!already || isDriver || !ride?.id || isActive) return;
+    const id2 = setInterval(async () => {
+      try {
+        const updated = await api.fetchRide(ride.id);
+        if (updated.status !== ride.status) setRide(updated);
+      } catch { /* silent */ }
+    }, 15000);
+    return () => clearInterval(id2);
+  }, [already, isDriver, ride?.id, ride?.status, isActive]);
+
+  // Show review prompt when ride completes and user is a passenger
+  useEffect(() => {
+    if (!already || isDriver || !ride?.id || rideStatus !== 'completed' || hasReviewed) return;
+    AsyncStorage.getItem(`reviewed_${ride.id}`).then((val) => {
+      if (!val) setShowReview(true);
+      else setHasReviewed(true);
+    });
+  }, [already, isDriver, ride?.id, rideStatus, hasReviewed]);
+
   const region = useMemo(() => {
+    if (isActive && liveDriverLoc) {
+      return {
+        latitude: liveDriverLoc.lat,
+        longitude: liveDriverLoc.lng,
+        latitudeDelta: 0.04,
+        longitudeDelta: 0.04,
+      };
+    }
     if (!ride?.fromLat || !ride?.fromLng) return null;
     const lat = (ride.fromLat + (ride.toLat ?? ride.fromLat)) / 2;
     const lng = (ride.fromLng + (ride.toLng ?? ride.fromLng)) / 2;
     return { latitude: lat, longitude: lng, latitudeDelta: 0.15, longitudeDelta: 0.15 };
-  }, [ride]);
+  }, [ride, isActive, liveDriverLoc]);
 
-  const d = ride?.driver;
-  const canContact = !!(user && d && (d.phone || d.email));
-  const isDriver = !!(user && ride && d && user.id === d.id);
-  const already = !!(user && ride && ride.passengerIds.includes(user.id));
   const full = !!(ride && ride.passengerIds.length >= ride.seatCount);
   const jr = ride?.myJoinRequest;
   const openJoin = !!(jr && (jr.status === 'pending' || jr.status === 'negotiating'));
-  const canRequestJoin = !!(user && ride && d && accountReady && !isDriver && !already && !full && !openJoin);
+  const canRequestJoin = !!(user && ride && d && accountReady2 && !isDriver && !already && !full && !openJoin);
   const rideUpcoming = ride ? new Date(ride.when).getTime() > Date.now() : false;
-  const showRideChat = !!user && accountReady && already && !isDriver && !!ride?.chatThreadId && rideUpcoming;
+  const showRideChat = !!user && accountReady2 && already && !isDriver && !!ride?.chatThreadId && rideUpcoming;
+
+  const submitReview = async () => {
+    if (!ride || !ride.driver) return;
+    setReviewSubmitting(true);
+    try {
+      await api.submitReview(ride.id, ride.driver.id, reviewRating, reviewComment.trim());
+      await AsyncStorage.setItem(`reviewed_${ride.id}`, '1');
+      setHasReviewed(true);
+      setShowReview(false);
+      Alert.alert('Thanks!', 'Your review has been posted.');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '';
+      if (msg.includes('already')) {
+        await AsyncStorage.setItem(`reviewed_${ride.id}`, '1');
+        setHasReviewed(true);
+        setShowReview(false);
+      } else {
+        Alert.alert('Could not submit', msg || 'Try again.');
+      }
+    } finally { setReviewSubmitting(false); }
+  };
+
+  const handleStartRide = async () => {
+    if (!ride) return;
+    Alert.alert('Start ride?', 'Passengers will be notified and you\'ll begin sharing your location.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Start', onPress: async () => {
+          setRideActionBusy(true);
+          try {
+            const updated = await api.startRide(ride.id);
+            setRide(updated);
+          } catch (e) { Alert.alert('Failed', e instanceof Error ? e.message : 'Try again'); }
+          finally { setRideActionBusy(false); }
+        },
+      },
+    ]);
+  };
+
+  const handleEndRide = async () => {
+    if (!ride) return;
+    Alert.alert('End ride?', 'Location sharing will stop and passengers will be notified.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'End ride', style: 'destructive', onPress: async () => {
+          setRideActionBusy(true);
+          try {
+            const updated = await api.endRide(ride.id);
+            setRide(updated);
+            setLiveDriverLoc(null);
+            if (trackingIntervalRef.current) { clearInterval(trackingIntervalRef.current); trackingIntervalRef.current = null; }
+          } catch (e) { Alert.alert('Failed', e instanceof Error ? e.message : 'Try again'); }
+          finally { setRideActionBusy(false); }
+        },
+      },
+    ]);
+  };
 
   const submitJoinRequest = async () => {
     if (!user || !ride) { Alert.alert('Sign in', 'Sign in to request a seat.'); return; }
-    if (!accountReady) {
+    if (!accountReady2) {
       Alert.alert('Verification required', 'Finish verification before requesting a seat.', [
         { text: 'Later', style: 'cancel' },
         { text: 'Verify', onPress: () => router.push('/verify-account') },
@@ -123,7 +279,7 @@ export default function RideDetailScreen() {
       const updated = await api.riderJoinAction(jr.id, action, counterFare);
       await load();
       if (updated.chatThreadId) { await refreshThreads(); openThread(updated.chatThreadId); }
-      if (action === 'accept') Alert.alert("You're in" ,'Chat is now open below.');
+      if (action === 'accept') Alert.alert("You're in!", 'Chat is now open below.');
     } catch (e) { Alert.alert('Action failed', e instanceof Error ? e.message : 'Try again'); }
     finally { setSubmitting(false); }
   };
@@ -171,6 +327,64 @@ export default function RideDetailScreen() {
     <LinearGradient colors={[Neon.gradientStart, Neon.gradientMid, Neon.gradientEnd]} style={styles.bg}>
       <AnimatedBackground />
 
+      {/* DRIVER PROFILE MODAL */}
+      {d && (
+        <DriverProfileModal
+          driverId={showDriverProfile ? d.id : null}
+          driverName={d.name}
+          driverAvatarUrl={d.avatarUrl}
+          ratingAvg={d.ratingAvg}
+          ratingCount={d.ratingCount}
+          onClose={() => setShowDriverProfile(false)}
+        />
+      )}
+
+      {/* POST-RIDE REVIEW MODAL */}
+      <Modal visible={showReview} transparent animationType="slide" onRequestClose={() => setShowReview(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>How was your ride?</Text>
+            <Text style={styles.modalSub}>
+              {ride?.from} → {ride?.to}
+            </Text>
+            {/* STARS */}
+            <View style={styles.reviewStarsRow}>
+              {[1, 2, 3, 4, 5].map((s) => (
+                <Pressable key={s} onPress={() => setReviewRating(s)} hitSlop={8}>
+                  <Text style={[styles.reviewStar, s <= reviewRating && styles.reviewStarOn]}>★</Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={styles.reviewRatingLabel}>
+              {['', 'Poor', 'Fair', 'Good', 'Great', 'Excellent'][reviewRating]}
+            </Text>
+            <TextInput
+              value={reviewComment}
+              onChangeText={setReviewComment}
+              placeholder="Add a comment (optional)"
+              placeholderTextColor={Neon.muted}
+              style={styles.reviewInput}
+              multiline
+              maxLength={300}
+            />
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => { setShowReview(false); AsyncStorage.setItem(`reviewed_${ride?.id ?? ''}`, '1'); setHasReviewed(true); }}
+                style={styles.modalCancel}>
+                <Text style={styles.modalCancelText}>Skip</Text>
+              </Pressable>
+              <Pressable onPress={submitReview} disabled={reviewSubmitting} style={styles.modalConfirm}>
+                <LinearGradient colors={[Neon.accent, '#c01920']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.modalConfirmGrad}>
+                  {reviewSubmitting
+                    ? <ActivityIndicator size="small" color="#fff" />
+                    : <Text style={styles.modalConfirmText}>POST REVIEW</Text>}
+                </LinearGradient>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* COUNTER MODAL */}
       <Modal visible={counterModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -207,6 +421,22 @@ export default function RideDetailScreen() {
           <Text style={styles.backLabel}>Rides</Text>
         </Pressable>
 
+        {/* LIVE RIDE BANNER (passenger) */}
+        {already && !isDriver && isActive && (
+          <View style={styles.liveBanner}>
+            <View style={styles.liveDot} />
+            <Text style={styles.liveBannerText}>RIDE IN PROGRESS — driver location updating live</Text>
+          </View>
+        )}
+
+        {/* DRIVER TRACKING BANNER */}
+        {isDriver && isActive && (
+          <View style={[styles.liveBanner, styles.liveBannerDriver]}>
+            <View style={styles.liveDot} />
+            <Text style={styles.liveBannerText}>SHARING LOCATION with passengers</Text>
+          </View>
+        )}
+
         {/* ROUTE HERO */}
         <View style={styles.routeHero}>
           <View style={styles.routeHeroInner}>
@@ -217,7 +447,9 @@ export default function RideDetailScreen() {
             <View style={styles.routeConnector}>
               <View style={styles.routeConnectorLine} />
               <View style={styles.routeTimePill}>
-                <Text style={styles.routeTimeText}>{timeUntil(ride.when)}</Text>
+                <Text style={styles.routeTimeText}>
+                  {isActive ? 'LIVE' : rideStatus === 'completed' ? 'DONE' : timeUntil(ride.when)}
+                </Text>
               </View>
               <View style={styles.routeConnectorLine} />
             </View>
@@ -257,16 +489,18 @@ export default function RideDetailScreen() {
           <View style={styles.mapSection}>
             <View style={styles.sectionHeader}>
               <View style={styles.sectionLine} />
-              <Text style={styles.sectionTitle}>ROUTE MAP</Text>
+              <Text style={styles.sectionTitle}>{isActive ? 'LIVE TRACKING' : 'ROUTE MAP'}</Text>
               <View style={styles.sectionLine} />
             </View>
             <View style={styles.mapWrap}>
               <MapView
                 style={styles.map}
-                initialRegion={region}
                 region={region}
-                provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}>
+                provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
+              >
+                {/* static pickup marker */}
                 <Marker coordinate={{ latitude: ride.fromLat, longitude: ride.fromLng }} title="Pickup" pinColor="#4ade80" />
+                {/* static dropoff marker */}
                 {ride.toLat != null && ride.toLng != null && (
                   <>
                     <Marker coordinate={{ latitude: ride.toLat, longitude: ride.toLng }} title="Drop-off" pinColor={Neon.accent} />
@@ -275,16 +509,37 @@ export default function RideDetailScreen() {
                         { latitude: ride.fromLat, longitude: ride.fromLng },
                         { latitude: ride.toLat, longitude: ride.toLng },
                       ]}
-                      strokeColor={Neon.accent}
+                      strokeColor={isActive ? 'rgba(232,33,39,0.3)' : Neon.accent}
                       strokeWidth={3}
                     />
                   </>
+                )}
+                {/* live driver location marker */}
+                {isActive && liveDriverLoc && (
+                  <Marker
+                    coordinate={{ latitude: liveDriverLoc.lat, longitude: liveDriverLoc.lng }}
+                    title="Driver"
+                    anchor={{ x: 0.5, y: 0.5 }}
+                  >
+                    <View style={styles.carMarker}>
+                      <Text style={styles.carMarkerIcon}>🚗</Text>
+                    </View>
+                  </Marker>
                 )}
               </MapView>
               <View style={styles.mapLegend}>
                 <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: '#4ade80' }]} /><Text style={styles.legendText}>Pickup</Text></View>
                 <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: Neon.accent }]} /><Text style={styles.legendText}>Drop-off</Text></View>
+                {isActive && liveDriverLoc && (
+                  <View style={styles.legendItem}><Text style={styles.legendCarIcon}>🚗</Text><Text style={styles.legendText}>Driver</Text></View>
+                )}
               </View>
+              {isActive && !liveDriverLoc && (
+                <View style={styles.mapOverlay}>
+                  <ActivityIndicator size="small" color={Neon.accent} />
+                  <Text style={styles.mapOverlayText}>Waiting for driver location…</Text>
+                </View>
+              )}
             </View>
           </View>
         )}
@@ -305,8 +560,13 @@ export default function RideDetailScreen() {
                 <Text style={styles.driverName}>{d?.name ?? 'Unknown'}</Text>
                 <View style={styles.driverBadges}>
                   <View style={styles.driverBadge}><Text style={styles.driverBadgeText}>✓ Verified</Text></View>
-                  <View style={styles.driverBadge}><Text style={styles.driverBadgeText}>★ 5.0</Text></View>
+                  {d?.ratingAvg != null
+                    ? <View style={styles.driverBadge}><Text style={styles.driverBadgeText}>★ {d.ratingAvg.toFixed(1)} ({d.ratingCount})</Text></View>
+                    : <View style={styles.driverBadge}><Text style={styles.driverBadgeText}>★ New</Text></View>}
                 </View>
+                <Pressable onPress={() => setShowDriverProfile(true)} style={styles.viewProfileBtn}>
+                  <Text style={styles.viewProfileBtnText}>View Profile & Reviews ›</Text>
+                </Pressable>
               </View>
             </View>
 
@@ -315,7 +575,7 @@ export default function RideDetailScreen() {
                 <Text style={styles.contactLockedIcon}>🔒</Text>
                 <Text style={styles.contactLockedText}>Sign in to view contact details</Text>
               </View>
-            ) : canContact ? (
+            ) : !!(user && d && (d.phone || d.email)) ? (
               <View style={styles.contactGrid}>
                 {d?.phone && (
                   <Pressable onPress={() => Linking.openURL(telUrl(d.phone!))} style={styles.contactBtn}>
@@ -358,14 +618,41 @@ export default function RideDetailScreen() {
           <View style={styles.chatClosed}><Text style={styles.chatClosedText}>Chat closed — ride has departed</Text></View>
         )}
 
-        {/* DRIVER INFO BOX + CANCEL */}
+        {/* DRIVER CONTROLS */}
         {isDriver && (
           <>
             <View style={styles.infoBox}>
               <Text style={styles.infoBoxIcon}>🚗</Text>
               <Text style={styles.infoBoxText}>Manage join requests and fares in your Inbox tab.</Text>
             </View>
-            {!ride.cancelled && (
+
+            {/* START RIDE button */}
+            {!ride.cancelled && rideStatus === 'scheduled' && taken > 0 && (
+              <Pressable onPress={handleStartRide} disabled={rideActionBusy} style={styles.startRideBtn}>
+                <LinearGradient colors={['#16a34a', '#15803d']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.startRideBtnGrad}>
+                  {rideActionBusy
+                    ? <ActivityIndicator size="small" color="#fff" />
+                    : <Text style={styles.startRideBtnText}>▶  START RIDE</Text>}
+                </LinearGradient>
+              </Pressable>
+            )}
+
+            {/* END RIDE button */}
+            {rideStatus === 'active' && (
+              <Pressable onPress={handleEndRide} disabled={rideActionBusy} style={styles.endRideBtn}>
+                {rideActionBusy
+                  ? <ActivityIndicator size="small" color="#ef4444" />
+                  : <Text style={styles.endRideBtnText}>⏹  END RIDE</Text>}
+              </Pressable>
+            )}
+
+            {rideStatus === 'completed' && (
+              <View style={styles.completedBadge}>
+                <Text style={styles.completedBadgeText}>✓ RIDE COMPLETED</Text>
+              </View>
+            )}
+
+            {!ride.cancelled && rideStatus === 'scheduled' && (
               <Pressable
                 onPress={() =>
                   Alert.alert(
@@ -524,6 +811,19 @@ const styles = StyleSheet.create({
   backArrow: { color: Neon.accent, fontSize: 28, fontWeight: '300', lineHeight: 32 },
   backLabel: { color: Neon.accentSoft, fontSize: 15, fontWeight: '600' },
 
+  /* LIVE BANNERS */
+  liveBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginHorizontal: 20, marginBottom: 12, paddingVertical: 10, paddingHorizontal: 14,
+    backgroundColor: 'rgba(74,222,128,0.08)', borderRadius: 12,
+    borderWidth: 1, borderColor: 'rgba(74,222,128,0.3)',
+  },
+  liveBannerDriver: {
+    backgroundColor: 'rgba(96,165,250,0.08)', borderColor: 'rgba(96,165,250,0.3)',
+  },
+  liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#4ade80' },
+  liveBannerText: { color: '#4ade80', fontSize: 11, fontWeight: '800', letterSpacing: 0.8, flex: 1 },
+
   /* ROUTE HERO */
   routeHero: {
     marginHorizontal: 20, marginBottom: 16,
@@ -573,7 +873,7 @@ const styles = StyleSheet.create({
 
   /* MAP */
   mapSection: { marginBottom: 20 },
-  mapWrap: { marginHorizontal: 20, height: 220, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(232,33,39,0.25)' },
+  mapWrap: { marginHorizontal: 20, height: 240, borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(232,33,39,0.25)' },
   map: { ...StyleSheet.absoluteFillObject },
   mapLegend: {
     position: 'absolute', bottom: 10, left: 10,
@@ -585,6 +885,22 @@ const styles = StyleSheet.create({
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },
   legendText: { color: Neon.accentSoft, fontSize: 11, fontWeight: '600' },
+  legendCarIcon: { fontSize: 14 },
+  mapOverlay: {
+    position: 'absolute', bottom: 10, right: 10,
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(13,13,15,0.85)', borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderWidth: 1, borderColor: Neon.border,
+  },
+  mapOverlayText: { color: Neon.muted, fontSize: 11 },
+  carMarker: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: Neon.accent,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: '#fff',
+  },
+  carMarkerIcon: { fontSize: 18 },
 
   /* SECTION HEADER */
   sectionHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginHorizontal: 20, marginBottom: 12 },
@@ -648,6 +964,27 @@ const styles = StyleSheet.create({
   },
   infoBoxIcon: { fontSize: 20 },
   infoBoxText: { flex: 1, color: Neon.muted, fontSize: 14, lineHeight: 20 },
+
+  /* START / END RIDE */
+  startRideBtn: { marginHorizontal: 20, marginBottom: 12, borderRadius: 14, overflow: 'hidden' },
+  startRideBtnGrad: { paddingVertical: 15, alignItems: 'center', justifyContent: 'center', minHeight: 50 },
+  startRideBtnText: { color: '#fff', fontWeight: '900', fontSize: 14, letterSpacing: 1.5 },
+  endRideBtn: {
+    marginHorizontal: 20, marginBottom: 12, paddingVertical: 14,
+    borderRadius: 14, alignItems: 'center', justifyContent: 'center', minHeight: 50,
+    borderWidth: 1, borderColor: 'rgba(239,68,68,0.5)',
+    backgroundColor: 'rgba(239,68,68,0.1)',
+  },
+  endRideBtnText: { color: '#ef4444', fontWeight: '900', fontSize: 14, letterSpacing: 1.2 },
+
+  /* COMPLETED */
+  completedBadge: {
+    marginHorizontal: 20, marginBottom: 12, paddingVertical: 12,
+    borderRadius: 14, alignItems: 'center',
+    borderWidth: 1, borderColor: 'rgba(74,222,128,0.4)',
+    backgroundColor: 'rgba(74,222,128,0.1)',
+  },
+  completedBadgeText: { color: '#4ade80', fontWeight: '900', fontSize: 12, letterSpacing: 1.5 },
 
   /* VERIFY BANNER */
   verifyBanner: {
@@ -719,6 +1056,20 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(113,113,122,0.08)',
   },
   cancelledBadgeText: { color: Neon.muted, fontWeight: '900', fontSize: 12, letterSpacing: 1.5 },
+
+  viewProfileBtn: { marginTop: 6 },
+  viewProfileBtnText: { color: '#818cf8', fontSize: 12, fontWeight: '700' },
+
+  /* REVIEW MODAL */
+  reviewStarsRow: { flexDirection: 'row', gap: 8, justifyContent: 'center', marginBottom: 8 },
+  reviewStar: { fontSize: 36, color: 'rgba(255,255,255,0.15)' },
+  reviewStarOn: { color: '#facc15' },
+  reviewRatingLabel: { color: Neon.muted, fontSize: 13, fontWeight: '600', textAlign: 'center', marginBottom: 14 },
+  reviewInput: {
+    backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: Neon.border,
+    borderRadius: 14, padding: 12, color: Neon.text, fontSize: 14,
+    minHeight: 72, textAlignVertical: 'top', marginBottom: 18,
+  },
 
   /* MODAL */
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', padding: 24 },

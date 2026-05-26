@@ -1,20 +1,61 @@
+import { useFocusEffect } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useState } from 'react';
+import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 
 import { AnimatedBackground } from '@/components/AnimatedBackground';
 import { Neon } from '@/constants/theme';
 import { useAuth } from '@/contexts/AuthContext';
+import * as api from '@/lib/api';
+import { rideDetailHref } from '@/lib/rideHref';
+import type { Ride } from '@/lib/types';
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
-const STAT_ITEMS = [
-  { label: 'Rides Taken', value: '—' },
-  { label: 'Rides Offered', value: '—' },
-  { label: 'Rating', value: '5.0 ★' },
-];
+function formatWhen(iso: string) {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    });
+  } catch { return iso; }
+}
+
+function timeUntil(iso: string) {
+  const diff = new Date(iso).getTime() - Date.now();
+  if (diff <= 0) return null;
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  if (h > 24) return `${Math.floor(h / 24)}d away`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function RideStatusBadge({ status }: { status?: string }) {
+  if (status === 'active') {
+    return (
+      <View style={[badge.wrap, badge.active]}>
+        <View style={badge.dot} />
+        <Text style={[badge.text, { color: '#4ade80' }]}>LIVE</Text>
+      </View>
+    );
+  }
+  if (status === 'completed') {
+    return <View style={[badge.wrap, badge.done]}><Text style={[badge.text, { color: Neon.muted }]}>DONE</Text></View>;
+  }
+  return <View style={[badge.wrap, badge.upcoming]}><Text style={[badge.text, { color: Neon.accentSoft }]}>UPCOMING</Text></View>;
+}
+
+const badge = StyleSheet.create({
+  wrap: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, borderWidth: 1 },
+  active: { borderColor: 'rgba(74,222,128,0.4)', backgroundColor: 'rgba(74,222,128,0.1)' },
+  done: { borderColor: 'rgba(113,113,122,0.3)', backgroundColor: 'rgba(113,113,122,0.08)' },
+  upcoming: { borderColor: 'rgba(232,33,39,0.3)', backgroundColor: 'rgba(232,33,39,0.08)' },
+  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#4ade80' },
+  text: { fontSize: 9, fontWeight: '900', letterSpacing: 1.2 },
+});
 
 export default function ProfileScreen() {
   const { user, loading, logout } = useAuth();
@@ -23,6 +64,28 @@ export default function ProfileScreen() {
   const scaleBtn = useSharedValue(1);
   const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
   const logoutStyle = useAnimatedStyle(() => ({ transform: [{ scale: scaleBtn.value }] }));
+
+  const [myRides, setMyRides] = useState<Ride[]>([]);
+  const [ridesLoading, setRidesLoading] = useState(false);
+  const [driverRides, setDriverRides] = useState<Ride[]>([]);
+
+  useFocusEffect(useCallback(() => {
+    if (!user?.accountReady) return;
+    setRidesLoading(true);
+    Promise.all([
+      api.fetchMyPassengerRides().catch(() => [] as Ride[]),
+      api.fetchMyRides().catch(() => [] as Ride[]),
+    ]).then(([passenger, driver]) => {
+      setMyRides(passenger);
+      setDriverRides(driver);
+    }).finally(() => setRidesLoading(false));
+  }, [user?.accountReady]));
+
+  const activeRides = myRides.filter((r) => r.status === 'active');
+  const upcomingRides = myRides.filter((r) => r.status === 'scheduled' && new Date(r.when).getTime() > Date.now());
+  const pastRides = myRides.filter((r) => r.status === 'completed' || new Date(r.when).getTime() <= Date.now()).slice(0, 5);
+
+  const ratingVal = user?.ratingAvg != null ? `${user.ratingAvg.toFixed(1)} ★` : '—';
 
   if (loading) {
     return (
@@ -91,13 +154,121 @@ export default function ProfileScreen() {
 
             {/* STATS ROW */}
             <View style={styles.statsRow}>
-              {STAT_ITEMS.map((s) => (
-                <View key={s.label} style={styles.statCard}>
-                  <Text style={styles.statVal}>{s.value}</Text>
-                  <Text style={styles.statLabel}>{s.label}</Text>
-                </View>
-              ))}
+              <View style={styles.statCard}>
+                <Text style={styles.statVal}>{ridesLoading ? '—' : myRides.length}</Text>
+                <Text style={styles.statLabel}>Rides Taken</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statVal}>{ridesLoading ? '—' : driverRides.length}</Text>
+                <Text style={styles.statLabel}>Rides Offered</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statVal}>{ratingVal}</Text>
+                <Text style={styles.statLabel}>Rating</Text>
+              </View>
             </View>
+
+            {/* ── MY RIDES SECTION ── */}
+            {user.accountReady && (
+              <View style={styles.ridesSection}>
+                <View style={styles.sectionHeader}>
+                  <View style={styles.sectionLine} />
+                  <Text style={styles.sectionTitle}>MY RIDES</Text>
+                  <View style={styles.sectionLine} />
+                </View>
+
+                {ridesLoading ? (
+                  <View style={styles.ridesLoader}>
+                    <ActivityIndicator size="small" color={Neon.accent} />
+                  </View>
+                ) : myRides.length === 0 ? (
+                  <View style={styles.ridesEmpty}>
+                    <Text style={styles.ridesEmptyIcon}>🚗</Text>
+                    <Text style={styles.ridesEmptyText}>No rides yet</Text>
+                    <Text style={styles.ridesEmptySub}>Join a ride from the Rides tab to see it here.</Text>
+                  </View>
+                ) : (
+                  <>
+                    {/* ACTIVE RIDES — shown first and highlighted */}
+                    {activeRides.map((ride) => (
+                      <Pressable key={ride.id} onPress={() => router.push(rideDetailHref(ride.id))} style={styles.activeRideCard}>
+                        <LinearGradient
+                          colors={['rgba(74,222,128,0.12)', 'rgba(74,222,128,0.04)']}
+                          style={styles.activeRideGrad}>
+                          <View style={styles.rideCardTop}>
+                            <View style={styles.rideCardRoute}>
+                              <View style={styles.routeDotGreen} />
+                              <Text style={styles.rideCardFrom} numberOfLines={1}>{ride.from}</Text>
+                              <Text style={styles.rideCardArrow}>›</Text>
+                              <View style={styles.routeDotRed} />
+                              <Text style={styles.rideCardTo} numberOfLines={1}>{ride.to}</Text>
+                            </View>
+                            <RideStatusBadge status={ride.status} />
+                          </View>
+                          <View style={styles.rideCardMeta}>
+                            <Text style={styles.rideCardDriver}>🚗 {ride.driver?.name ?? 'Driver'}</Text>
+                            <Text style={styles.rideCardWhen}>{formatWhen(ride.when)}</Text>
+                          </View>
+                          <Text style={styles.rideCardTap}>Tap to track live location →</Text>
+                        </LinearGradient>
+                      </Pressable>
+                    ))}
+
+                    {/* UPCOMING RIDES */}
+                    {upcomingRides.map((ride) => {
+                      const eta = timeUntil(ride.when);
+                      return (
+                        <Pressable key={ride.id} onPress={() => router.push(rideDetailHref(ride.id))} style={styles.rideCard}>
+                          <View style={styles.rideCardTop}>
+                            <View style={styles.rideCardRoute}>
+                              <View style={styles.routeDotGreen} />
+                              <Text style={styles.rideCardFrom} numberOfLines={1}>{ride.from}</Text>
+                              <Text style={styles.rideCardArrow}>›</Text>
+                              <View style={styles.routeDotRed} />
+                              <Text style={styles.rideCardTo} numberOfLines={1}>{ride.to}</Text>
+                            </View>
+                            <RideStatusBadge status={ride.status} />
+                          </View>
+                          <View style={styles.rideCardMeta}>
+                            <Text style={styles.rideCardDriver}>🚗 {ride.driver?.name ?? 'Driver'}</Text>
+                            <Text style={styles.rideCardWhen}>{eta ? `${eta} · ` : ''}{formatWhen(ride.when)}</Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+
+                    {/* PAST RIDES */}
+                    {pastRides.length > 0 && (
+                      <>
+                        <View style={[styles.sectionHeader, { marginTop: 8 }]}>
+                          <View style={styles.sectionLine} />
+                          <Text style={styles.sectionTitle}>PAST</Text>
+                          <View style={styles.sectionLine} />
+                        </View>
+                        {pastRides.map((ride) => (
+                          <Pressable key={ride.id} onPress={() => router.push(rideDetailHref(ride.id))} style={styles.rideCard}>
+                            <View style={styles.rideCardTop}>
+                              <View style={styles.rideCardRoute}>
+                                <View style={[styles.routeDotGreen, { opacity: 0.4 }]} />
+                                <Text style={[styles.rideCardFrom, { opacity: 0.6 }]} numberOfLines={1}>{ride.from}</Text>
+                                <Text style={styles.rideCardArrow}>›</Text>
+                                <View style={[styles.routeDotRed, { opacity: 0.4 }]} />
+                                <Text style={[styles.rideCardTo, { opacity: 0.6 }]} numberOfLines={1}>{ride.to}</Text>
+                              </View>
+                              <RideStatusBadge status={ride.status} />
+                            </View>
+                            <View style={styles.rideCardMeta}>
+                              <Text style={styles.rideCardDriver}>🚗 {ride.driver?.name ?? 'Driver'}</Text>
+                              <Text style={styles.rideCardWhen}>{formatWhen(ride.when)}</Text>
+                            </View>
+                          </Pressable>
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
+              </View>
+            )}
 
             {/* INFO CARDS */}
             <View style={styles.infoSection}>
@@ -106,7 +277,6 @@ export default function ProfileScreen() {
                 <Text style={styles.sectionTitle}>DETAILS</Text>
                 <View style={styles.sectionLine} />
               </View>
-
               <View style={styles.infoCard}>
                 {[
                   { icon: '📞', label: 'Phone', value: user.phone ?? '—', action: user.phone ? () => Linking.openURL(`tel:${user.phone!.replace(/[^\d+]/g, '')}`) : undefined },
@@ -264,6 +434,41 @@ const styles = StyleSheet.create({
   },
   statVal: { color: Neon.text, fontSize: 20, fontWeight: '800' },
   statLabel: { color: Neon.muted, fontSize: 10, fontWeight: '600', marginTop: 3, textTransform: 'uppercase', letterSpacing: 0.5, textAlign: 'center' },
+
+  /* MY RIDES */
+  ridesSection: { marginBottom: 28 },
+  ridesLoader: { alignItems: 'center', paddingVertical: 24 },
+  ridesEmpty: { alignItems: 'center', paddingVertical: 28, gap: 8, marginHorizontal: 22 },
+  ridesEmptyIcon: { fontSize: 36 },
+  ridesEmptyText: { color: Neon.text, fontSize: 16, fontWeight: '700' },
+  ridesEmptySub: { color: Neon.muted, fontSize: 13, textAlign: 'center', lineHeight: 20 },
+
+  /* ACTIVE RIDE CARD */
+  activeRideCard: {
+    marginHorizontal: 22, marginBottom: 10,
+    borderRadius: 18, overflow: 'hidden',
+    borderWidth: 1.5, borderColor: 'rgba(74,222,128,0.4)',
+  },
+  activeRideGrad: { padding: 16 },
+  rideCardTap: { color: '#4ade80', fontSize: 11, fontWeight: '700', marginTop: 8 },
+
+  /* RIDE CARD (upcoming + past) */
+  rideCard: {
+    marginHorizontal: 22, marginBottom: 10,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 1, borderColor: Neon.border,
+    borderRadius: 16, padding: 14,
+  },
+  rideCardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
+  rideCardRoute: { flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1, marginRight: 8 },
+  routeDotGreen: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#4ade80', flexShrink: 0 },
+  routeDotRed: { width: 8, height: 8, borderRadius: 4, backgroundColor: Neon.accent, flexShrink: 0 },
+  rideCardFrom: { color: Neon.text, fontSize: 13, fontWeight: '700', flexShrink: 1 },
+  rideCardArrow: { color: Neon.muted, fontSize: 13, fontWeight: '700' },
+  rideCardTo: { color: Neon.text, fontSize: 13, fontWeight: '700', flexShrink: 1 },
+  rideCardMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  rideCardDriver: { color: Neon.muted, fontSize: 12, fontWeight: '600' },
+  rideCardWhen: { color: Neon.muted, fontSize: 11 },
 
   /* INFO CARD */
   infoSection: { marginBottom: 24 },

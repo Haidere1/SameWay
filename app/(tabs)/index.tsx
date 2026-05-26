@@ -16,6 +16,7 @@ import {
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 
 import { AnimatedBackground } from '@/components/AnimatedBackground';
+import { DriverProfileModal } from '@/components/DriverProfileModal';
 import { RideCard } from '@/components/RideCard';
 import { Neon } from '@/constants/theme';
 import { useAuth } from '@/contexts/AuthContext';
@@ -56,6 +57,7 @@ export default function RidesScreen() {
   const [loc, setLoc] = useState<{ lat: number; lng: number } | null>(null);
   const [locNote, setLocNote] = useState<string | null>(null);
   const [activeFilter, setActiveFilter] = useState<Filter>('All');
+  const [profileDriver, setProfileDriver] = useState<{ id: string; name: string; avatarUrl: string | null; ratingAvg?: number | null; ratingCount?: number } | null>(null);
 
   const load = useCallback(async (coords: { lat: number; lng: number } | null) => {
     const data = coords ? await api.fetchRides(coords.lat, coords.lng) : await api.fetchRides();
@@ -119,6 +121,14 @@ export default function RidesScreen() {
 
   return (
     <LinearGradient colors={[Neon.gradientStart, Neon.gradientMid, Neon.gradientEnd]} style={styles.bg}>
+      <DriverProfileModal
+        driverId={profileDriver?.id ?? null}
+        driverName={profileDriver?.name ?? ''}
+        driverAvatarUrl={profileDriver?.avatarUrl ?? null}
+        ratingAvg={profileDriver?.ratingAvg}
+        ratingCount={profileDriver?.ratingCount}
+        onClose={() => setProfileDriver(null)}
+      />
       <AnimatedBackground />
       <ScrollView
         contentContainerStyle={styles.scroll}
@@ -229,6 +239,13 @@ export default function RidesScreen() {
               currentUserId={user?.id ?? null}
               onJoin={() => router.push(rideDetailHref(ride.id, { join: true }))}
               onOpenDetail={() => router.push(rideDetailHref(ride.id))}
+              onViewDriverProfile={ride.driver ? () => setProfileDriver({
+                id: ride.driver!.id,
+                name: ride.driver!.name,
+                avatarUrl: ride.driver!.avatarUrl,
+                ratingAvg: ride.driver!.ratingAvg,
+                ratingCount: ride.driver!.ratingCount,
+              }) : undefined}
             />
           ))
         )}

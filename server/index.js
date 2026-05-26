@@ -112,6 +112,8 @@ function driverPublic(d, base, contact) {
     id: d._id.toString(),
     name: d.name,
     avatarUrl,
+    ratingAvg: d.ratingAvg ?? null,
+    ratingCount: d.ratingCount ?? 0,
   };
   if (!contact) return common;
   return {
@@ -135,6 +137,9 @@ function serializeRide(r, base, { distanceKm, driverContact } = {}) {
     toLat: r.toLat != null ? r.toLat : null,
     toLng: r.toLng != null ? r.toLng : null,
     cancelled: !!r.cancelled,
+    status: r.status || 'scheduled',
+    liveDriverLat: r.liveDriverLat != null ? r.liveDriverLat : null,
+    liveDriverLng: r.liveDriverLng != null ? r.liveDriverLng : null,
     driver: driverPublic(r.driver, base, driverContact),
   };
   if (distanceKm != null && Number.isFinite(distanceKm)) {
@@ -495,9 +500,9 @@ app.get('/api/rides', async (req, res) => {
     const now = new Date();
     const lat = parseFloat(req.query.lat);
     const lng = parseFloat(req.query.lng);
-    const rides = await Ride.find({ when: { $gte: now }, cancelled: { $ne: true } })
+    const rides = await Ride.find({ when: { $gte: now }, cancelled: { $ne: true }, status: { $ne: 'completed' } })
       .sort({ when: 1 })
-      .populate('driver', 'name email phone avatarPath cnic')
+      .populate('driver', 'name email phone avatarPath cnic ratingAvg ratingCount')
       .lean();
 
     const base = baseUrl(req);
@@ -591,7 +596,7 @@ app.post('/api/rides', authMiddleware, requireAccountReady, async (req, res) => 
       toLat: tl,
       toLng: tlng,
     });
-    await ride.populate('driver', 'name email phone avatarPath cnic');
+    await ride.populate('driver', 'name email phone avatarPath cnic ratingAvg ratingCount');
     const d = ride.driver;
     const base = baseUrl(req);
     res.status(201).json(
@@ -928,11 +933,11 @@ app.get('/api/chat/threads', authMiddleware, requireAccountReady, async (req, re
     const threads = await ChatThread.find({
       $or: [{ rider: uid }, { driver: uid }],
     })
-      .populate('ride', 'from to when')
+      .populate('ride', 'from to when status')
       .sort({ updatedAt: -1 })
       .lean();
     const base = baseUrl(req);
-    res.json(threads.map((t) => serializeChatThread(t, base)));
+    res.json(threads.filter((t) => t.ride?.status !== 'completed').map((t) => serializeChatThread(t, base)));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to load chats' });
@@ -983,7 +988,7 @@ app.post('/api/chat/threads/:tid/messages', authMiddleware, requireAccountReady,
 app.get('/api/me/rides', authMiddleware, async (req, res) => {
   try {
     const rides = await Ride.find({ driver: req.userId })
-      .populate('driver', 'name email phone avatarPath cnic')
+      .populate('driver', 'name email phone avatarPath cnic ratingAvg ratingCount')
       .sort({ when: -1 })
       .lean();
     const base = baseUrl(req);
@@ -1136,6 +1141,125 @@ app.get('/api/users/:id/reviews', async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to load reviews' });
+  }
+});
+
+// ── GET /api/me/passenger-rides  — rides the user joined as a passenger ──────
+app.get('/api/me/passenger-rides', authMiddleware, async (req, res) => {
+  try {
+    const rides = await Ride.find({ passengers: req.userId })
+      .populate('driver', 'name email phone avatarPath cnic ratingAvg ratingCount')
+      .sort({ when: -1 })
+      .lean();
+    const base = baseUrl(req);
+    res.json(rides.map((r) => serializeRide(r, base, { driverContact: true })));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to load passenger rides' });
+  }
+});
+
+// ── POST /api/rides/:id/start  — driver starts the ride ─────────────────────
+app.post('/api/rides/:id/start', authMiddleware, requireAccountReady, async (req, res) => {
+  try {
+    const ride = await Ride.findById(req.params.id);
+    if (!ride) return res.status(404).json({ error: 'Ride not found' });
+    if (ride.driver.toString() !== req.userId) return res.status(403).json({ error: 'Only the driver can start the ride' });
+    if (ride.cancelled) return res.status(400).json({ error: 'Ride is cancelled' });
+    if (ride.status === 'active') return res.status(400).json({ error: 'Ride already started' });
+    if (ride.status === 'completed') return res.status(400).json({ error: 'Ride already completed' });
+
+    ride.status = 'active';
+    ride.startedAt = new Date();
+    await ride.save();
+
+    for (const passengerId of ride.passengers) {
+      await Notification.create({
+        user: passengerId,
+        kind: 'ride_started',
+        title: 'Ride started!',
+        message: `Your driver has started the ride from ${ride.from} to ${ride.to}. Track live on the map.`,
+        ride: ride._id,
+      });
+    }
+
+    await ride.populate('driver', 'name email phone avatarPath cnic ratingAvg ratingCount');
+    const base = baseUrl(req);
+    res.json(serializeRide(ride.toObject(), base, { driverContact: true }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to start ride' });
+  }
+});
+
+// ── POST /api/rides/:id/end  — driver ends the ride ─────────────────────────
+app.post('/api/rides/:id/end', authMiddleware, requireAccountReady, async (req, res) => {
+  try {
+    const ride = await Ride.findById(req.params.id);
+    if (!ride) return res.status(404).json({ error: 'Ride not found' });
+    if (ride.driver.toString() !== req.userId) return res.status(403).json({ error: 'Only the driver can end the ride' });
+    if (ride.status !== 'active') return res.status(400).json({ error: 'Ride is not active' });
+
+    ride.status = 'completed';
+    ride.liveDriverLat = null;
+    ride.liveDriverLng = null;
+    await ride.save();
+
+    for (const passengerId of ride.passengers) {
+      await Notification.create({
+        user: passengerId,
+        kind: 'ride_completed',
+        title: 'Arrived!',
+        message: `Your ride from ${ride.from} to ${ride.to} has been completed.`,
+        ride: ride._id,
+      });
+    }
+
+    await ride.populate('driver', 'name email phone avatarPath cnic ratingAvg ratingCount');
+    const base = baseUrl(req);
+    res.json(serializeRide(ride.toObject(), base, { driverContact: true }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to end ride' });
+  }
+});
+
+// ── PATCH /api/rides/:id/location  — driver pushes live location ─────────────
+app.patch('/api/rides/:id/location', authMiddleware, async (req, res) => {
+  try {
+    const { lat, lng } = req.body || {};
+    if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lng))) {
+      return res.status(400).json({ error: 'lat and lng are required' });
+    }
+    const ride = await Ride.findById(req.params.id).select('driver status');
+    if (!ride) return res.status(404).json({ error: 'Ride not found' });
+    if (ride.driver.toString() !== req.userId) return res.status(403).json({ error: 'Only the driver can update location' });
+    if (ride.status !== 'active') return res.status(400).json({ error: 'Ride is not active' });
+    await Ride.findByIdAndUpdate(req.params.id, { liveDriverLat: Number(lat), liveDriverLng: Number(lng) });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to update location' });
+  }
+});
+
+// ── GET /api/rides/:id/location  — passengers poll live driver location ───────
+app.get('/api/rides/:id/location', authMiddleware, async (req, res) => {
+  try {
+    const ride = await Ride.findById(req.params.id).select('driver passengers status liveDriverLat liveDriverLng').lean();
+    if (!ride) return res.status(404).json({ error: 'Ride not found' });
+    const uid = req.userId;
+    const isDriver = ride.driver.toString() === uid;
+    const isPassenger = (ride.passengers || []).some((p) => p.toString() === uid);
+    if (!isDriver && !isPassenger) return res.status(403).json({ error: 'Not on this ride' });
+    res.json({
+      status: ride.status || 'scheduled',
+      liveDriverLat: ride.liveDriverLat ?? null,
+      liveDriverLng: ride.liveDriverLng ?? null,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to get location' });
   }
 });
 
